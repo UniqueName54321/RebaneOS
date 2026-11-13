@@ -14,7 +14,7 @@ static uint8_t task_kernel_stacks[MAX_TASKS][TASK_KERNEL_STACK_SIZE] __attribute
 static pid_t next_pid = 1;
 static bool need_resched = false;
 
-#define TASK_TIME_SLICE_TICKS 5U
+#define TASK_TIME_SLICE_TICKS 5000U
 
 extern char boot_stack_bottom[];
 extern char boot_stack_top[];
