@@ -104,8 +104,8 @@ static inline void ata_read_words(uint16_t port, uint16_t* buffer,
 static inline void ata_write_words(uint16_t port, const uint16_t* buffer,
     size_t words) {
     asm volatile("rep outsw"
-        :
-        : "d"(port), "S"(buffer), "c"(words)
+        : "+S"(buffer), "+c"(words)
+        : "d"(port)
         : "memory");
 }
 

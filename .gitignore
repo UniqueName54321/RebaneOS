@@ -17,3 +17,4 @@
 /iso/boot/rockos.bin
 /iso/boot/rockos-install.img
 /iso/boot/selawik-OFL.txt
+*.bak

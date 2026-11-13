@@ -33,6 +33,7 @@
 
 #include "storage.h"
 #include "display.h"
+#include "serial.h"
 
 /* Read ONE 512-byte sector at 'lba' into 'buf'. Return 0 on success, non-zero on failure. */
 static int filesystem_storage_read(uint32_t lba, void *buf)
@@ -46,8 +47,26 @@ static int filesystem_storage_read(uint32_t lba, void *buf)
 static int filesystem_storage_write(uint32_t lba, const void *buf)
 {
     const block_device_t *device = storage_get_device();
-    if (!device || !buf) return FS_ERR_IO;
-    return block_write(device, lba, 1, buf) == BLOCK_RESULT_OK ? 0 : FS_ERR_IO;
+
+    if (!device || !buf) {
+        serial_write_string("[RockFS] Missing device/buffer at LBA ");
+        serial_write_hex(lba);
+        serial_write_string("\n");
+        return FS_ERR_IO;
+    }
+
+    block_result_t result = block_write(device, lba, 1, buf);
+
+    if (result != BLOCK_RESULT_OK) {
+        serial_write_string("[RockFS] Write failed at LBA ");
+        serial_write_hex(lba);
+        serial_write_string(": ");
+        serial_write_string(block_result_string(result));
+        serial_write_string("\n");
+        return FS_ERR_IO;
+    }
+
+    return 0;
 }
 
 /* Print one line of text to your screen/debug output. */
