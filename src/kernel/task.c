@@ -14,7 +14,7 @@ static uint8_t task_kernel_stacks[MAX_TASKS][TASK_KERNEL_STACK_SIZE] __attribute
 static pid_t next_pid = 1;
 static bool need_resched = false;
 
-#define TASK_TIME_SLICE_TICKS 5000U
+#define TASK_TIME_SLICE_TICKS 5U
 
 extern char boot_stack_bottom[];
 extern char boot_stack_top[];
@@ -436,10 +436,8 @@ void task_timer_tick(void) {
     if (current_task->slice_remaining > 0) {
         current_task->slice_remaining--;
     }
-    if ((current_task->is_idle && run_queue_head) ||
-        (current_task->slice_remaining == 0 && run_queue_head)) {
-        need_resched = true;
-    }
+    /* DEBUG: Timer-triggered preemption disabled.
+       The timer still counts ticks normally. */
 }
 
 void task_interrupt_exit(void) {
