@@ -2071,6 +2071,7 @@ static void shell_installer_handle_key(const input_key_event_t* event) {
     if (shell_installer_page == SHELL_INSTALLER_PAGE_NETWORK) {
         if (event->ascii == 's' || event->ascii == 'S') {
             shell_installer_navigate(SHELL_INSTALLER_ACTION_SKIP);
+            return;
         }
         shell_installer_draw_network();
         return;
