@@ -17,6 +17,17 @@
 /iso/boot/rockos.bin
 /iso/boot/rockos-install.img
 /iso/boot/selawik-OFL.txt
-*.bak
-/rebane-test.mzxDIPvb
+
+# Temporary RebaneOS testing environments
+/rebane-test.*/
+/rebane-sched.*/
+/rebane-preemption-test/
+
+# Virtual machine files
 *.vdi
+*.vbox
+*.vbox-prev
+
+# Debug logs and temporary disk inspections
+*.log
+*.raw
