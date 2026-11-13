@@ -436,10 +436,8 @@ void task_timer_tick(void) {
     if (current_task->slice_remaining > 0) {
         current_task->slice_remaining--;
     }
-    if ((current_task->is_idle && run_queue_head) ||
-        (current_task->slice_remaining == 0 && run_queue_head)) {
-        need_resched = true;
-    }
+    /* DEBUG: Timer-triggered preemption disabled.
+       The timer still counts ticks normally. */
 }
 
 void task_interrupt_exit(void) {
