@@ -18,6 +18,35 @@ Eventually, the incorrect name became sufficiently irritating that the author de
 
 RebaneOS is not affiliated with or endorsed by Lyra Rebane.
 
+## Building on Linux and macOS
+
+Run `./build-linux.sh` on Linux or `./build-macos.sh` on macOS. **The macOS
+script has not been tested.** Both build `rockosdualbootv.1.iso`, containing
+the 64-bit and 32-bit kernels and installer image; they do not launch QEMU.
+Run them from any directory. Arguments are passed to GNU Make, for example:
+
+```sh
+./build-linux.sh -j4 AUDIO_BOOT_TEST_TONE=0
+```
+
+Install GNU Make, Python 3, xorriso, and the Limine host tool and boot files.
+Linux also needs GCC and GNU binutils capable of building both x86-64 and
+i386 ELF code. The Linux script prefers `x86_64-elf-gcc` and `x86_64-elf-ld`
+when both are available, otherwise it uses native `gcc` and `ld`. On macOS,
+install an `x86_64-elf` GCC/binutils cross-toolchain; Apple's compiler and
+linker do not produce the required ELF kernels. Set `CC` and `LD` to override
+the compiler and linker. Set `LIMINE_TOOL` and `LIMINE_DATA_DIR` if Limine is
+not installed in its default locations.
+
+These scripts use the checked-in `src/drivers/ui_assets.h` instead of
+regenerating it with the Windows-only asset generator. If it is missing (for
+example, after `make clean`), restore it with
+`git restore src/drivers/ui_assets.h` before building. Changes to the font or
+logo require regenerating the atlas on Windows.
+
+The `make run` instructions below use Windows-specific QEMU audio settings;
+the Unix scripts only build the ISO.
+
 Original RockOS readme below:
 
 # RockOS
