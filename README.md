@@ -1,3 +1,25 @@
+# RebaneOS
+
+RebaneOS is a *very* early RockOS fork, created by UniqueName54321 / DifferentDance8.
+
+## Name
+
+RebaneOS was named after [Lyra Rebane](https://lyra.horse/), a programmer known for projects such as [`x86-css`](https://github.com/lyra).
+
+The name originates from an earlier operating system project, **LycaraOS**, which was intended to reference Lyra but was named incorrectly. The exact reason for naming LycaraOS after her in the first place has been forgotten.
+
+Possible explanations include:
+
+- An appreciation for her work on `x86-css`.
+- The author's tendency to name projects after relatively obscure internet personalities.
+- The amusing possibility of someone discovering that an entire operating system had been named after them for seemingly no reason.
+
+Eventually, the incorrect name became sufficiently irritating that the author decided to revisit the idea, this time using Lyra's actual surname.
+
+RebaneOS is not affiliated with or endorsed by Lyra Rebane.
+
+Original RockOS readme below:
+
 # RockOS
 
 RockOS is an experimental 64-bit x86 hobby operating system built from scratch
