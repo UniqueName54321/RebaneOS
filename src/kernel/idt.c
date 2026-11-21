@@ -11,6 +11,9 @@
 #include "timer.h"
 #include "display.h"
 #include "ring3.h"
+#ifndef ROCKOS_ARCH_32
+#include "linux_compat.h"
+#endif
 
 #define KERNEL_CS     0x08   /* must be the code segment of the GDT your boot code loads */
 #define IDT_INT_GATE  0x8E   /* present, DPL0, interrupt gate (clears IF on entry) */
@@ -87,6 +90,7 @@ static struct idt_ptr idtp;
 /* Defined in isr.S */
 extern const uint64_t isr_stub_table[VECTOR_COUNT];
 extern void ring3_syscall_stub(void);
+extern const uint64_t linux_interrupt_stub_table[VECTOR_COUNT];
 #endif
 
 /* Per-arch frame accessors (syscall ABI differs: ebx on i386, rdi on x86-64). */
@@ -322,12 +326,23 @@ void interrupt_dispatch(interrupt_frame_t* frame) {
         if (frame->vector == 14) {
             asm volatile ("mov %%cr2, %0" : "=r"(fault_address));
         }
+#ifndef ROCKOS_ARCH_32
+        if (linux_compat_current())
+            linux_compat_fault(frame->vector, frame->error_code, frame->rip,
+                fault_address);
+#endif
         ring3_fault_dispatch(frame->vector, frame->error_code, frame->rip,
             fault_address);
     }
 
     if (frame->vector == RING3_SYSCALL_VECTOR) {
         if ((frame->cs & 3) == 3) {
+#ifndef ROCKOS_ARCH_32
+            if (linux_compat_current()) {
+                frame->rax = (uint64_t)-38;
+                return;
+            }
+#endif
             if (frame->rax == RING3_SYSCALL_WIN32) {
                 frame->rax = ring3_win32_dispatch(
                     FRAME_WIN32_FN(frame), FRAME_WIN32_ARG1(frame),
@@ -382,7 +397,11 @@ void idt_init(void) {
     }
 
     for (int i = 0; i < VECTOR_COUNT; i++) {
+#ifdef ROCKOS_ARCH_32
         idt_set_gate((uint8_t)i, isr_stub_table[i], KERNEL_CS, IDT_INT_GATE);
+#else
+        idt_set_gate((uint8_t)i, linux_interrupt_stub_table[i], KERNEL_CS, IDT_INT_GATE);
+#endif
     }
     idt_set_gate(RING3_SYSCALL_VECTOR, (uintptr_t)ring3_syscall_stub,
         KERNEL_CS, IDT_USER_INT_GATE);

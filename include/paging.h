@@ -22,6 +22,15 @@ bool paging_map_kernel_mmio(uintptr_t physical_address, size_t byte_count,
     uintptr_t* virtual_address);
 bool paging_unmap_user_page(uintptr_t pml4_address, uintptr_t virtual_address,
     uintptr_t* physical_address);
+bool paging_user_page(uintptr_t pml4_address, uintptr_t virtual_address,
+    uintptr_t* physical_address, bool* writable);
+bool paging_protect_user_page(uintptr_t pml4_address, uintptr_t virtual_address,
+    bool writable);
+/* Includes PROT_NONE reservations; protection uses Linux PROT_READ/WRITE/EXEC. */
+bool paging_user_mapping(uintptr_t pml4_address, uintptr_t virtual_address,
+    uintptr_t* physical_address, unsigned* protection);
+bool paging_set_user_protection(uintptr_t pml4_address, uintptr_t virtual_address,
+    unsigned protection);
 void paging_init(void);
 void paging_load_address_space(uintptr_t pml4_address);
 uintptr_t paging_current_address_space(void);

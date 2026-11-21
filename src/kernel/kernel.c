@@ -19,6 +19,11 @@
 #include "serial.h"
 #include "desktop.h"
 #include "tour.h"
+#ifndef ROCKOS_ARCH_32
+#include "linux_compat.h"
+#include "linux_x11.h"
+#include "multiboot1.h"
+#endif
 
 #include <stddef.h>
 #include <stdint.h>
@@ -279,6 +284,22 @@ static void render_mouse_cursor(void) {
     if (screen_y >= 25) screen_y = 24;
     display_set_mouse_cursor((uint8_t)screen_x, (uint8_t)screen_y);
 }
+#ifndef ROCKOS_ARCH_32
+static bool kernel_boot_option(uintptr_t boot_info_address, const char* option) {
+    const multiboot1_info_t* info = (const void*)boot_info_address;
+    if (!(info->flags & MULTIBOOT1_INFO_CMDLINE) || !info->cmdline) return false;
+    const char* text = (const char*)(uintptr_t)info->cmdline;
+    while (*text) {
+        while (*text == ' ') text++;
+        size_t length = 0;
+        while (option[length] && text[length] == option[length]) length++;
+        if (!option[length] && (!text[length] || text[length] == ' ')) return true;
+        while (*text && *text != ' ') text++;
+    }
+    return false;
+}
+#endif
+
 
 void kernel_main(uint32_t boot_magic, uintptr_t boot_info_address) {
     // 1. Keep interrupts disabled during initialization
@@ -475,11 +496,23 @@ void kernel_main(uint32_t boot_magic, uintptr_t boot_info_address) {
     }
 
     shell_init();
+#ifndef ROCKOS_ARCH_32
+    linux_compat_init(boot_info_address);
+#endif
     serial_write_string("[boot] shell initialized; enabling interrupts\n");
     audio_play_test_tone();
 
     // 5. Enable interrupts only after complete hardware setup
     asm volatile ("sti");
+#ifndef ROCKOS_ARCH_32
+    bool linux_started = false;
+    if (kernel_boot_option(boot_info_address, "linux_test=busybox")) {
+        linux_started = linux_compat_launch("/bin/busybox", "echo linux-ok");
+    } else if (kernel_boot_option(boot_info_address, "linux_test=xeyes")) {
+        linux_started = linux_compat_launch("/usr/bin/xeyes", "");
+    }
+    if (linux_started) task_yield();
+#endif
 
     uint64_t last_rendered_tick = UINT64_MAX;
     /* Latched click counters (see input_mouse_state_t) so no click is lost
@@ -514,9 +547,13 @@ void kernel_main(uint32_t boot_magic, uintptr_t boot_info_address) {
             }
             desktop_update(current_ticks);
             render_mouse_cursor();
+#ifndef ROCKOS_ARCH_32
+            linux_x11_refresh();
+            if (linux_compat_active()) task_yield();
+#endif
             display_present();
-            /* No task_yield() here: it parked the UI behind every other task
-             * on every pass. hlt wakes on the next mouse/key/timer interrupt. */
+            /* Linux blocking syscalls need cooperative scheduling; otherwise
+             * keep the desktop independent of background worker tasks. */
             asm volatile ("hlt");
             continue;
         }
@@ -562,6 +599,10 @@ void kernel_main(uint32_t boot_magic, uintptr_t boot_info_address) {
                 shell_handle_key_event(&key_evt);
             }
         }
+#ifndef ROCKOS_ARCH_32
+        linux_x11_refresh();
+        if (linux_compat_active()) task_yield();
+#endif
         display_present();
         asm volatile ("hlt");
     }

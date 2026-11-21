@@ -168,8 +168,8 @@ bool gdt_init(uintptr_t kernel_stack_top) {
     gdt[0] = 0;
     gdt[1] = 0x00AF9A000000FFFFULL;
     gdt[2] = 0x00CF92000000FFFFULL;
-    gdt[3] = 0x00CFF2000000FFFFULL;
-    gdt[4] = 0x00AFFA000000FFFFULL;
+    gdt[3] = 0x00AFFA000000FFFFULL;
+    gdt[4] = 0x00CFF2000000FFFFULL;
 
     tss = (tss64_t){0};
     tss.rsp0 = kernel_stack_top;

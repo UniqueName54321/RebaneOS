@@ -47,6 +47,61 @@ regenerating the atlas on Windows.
 The `make run` instructions below use Windows-specific QEMU audio settings;
 the Unix scripts only build the ISO.
 
+## Linux binary compatibility (64-bit)
+
+The 64-bit kernel includes an initial Linux x86-64 ELF compatibility layer:
+Linux syscall entry, ELF interpreters and shared libraries, TLS, private user
+memory, terminal I/O, and a local X11 core-protocol server. Applications do not
+need to be rebuilt for RebaneOS.
+
+Build a separate application ISO:
+
+```sh
+./build-linux.sh -j4 AUDIO_BOOT_TEST_TONE=0 linux-iso
+qemu-system-x86_64 -machine pc -m 512M -boot d \
+    -cdrom build/rebane-linux.iso -serial stdio
+```
+
+The first build downloads upstream BusyBox and Alpine Linux v3.22 x86-64
+packages into `build/linux/`; it does not install host packages. The generated
+`build/linux-root.tar` contains the unchanged applications, musl interpreter,
+shared libraries and package data. Package versions, source URLs, licenses and
+SHA-256 hashes are recorded in `build/linux/manifest.json`. Downloads are
+cached locally; remove that generated cache to resolve a newer package set.
+The ordinary installer ISO and its boot configuration remain separate.
+
+At the RebaneOS shell:
+
+```text
+runlinux /bin/busybox echo linux-ok
+runlinux /usr/bin/xeyes
+```
+
+Only one Linux process can run at a time. The initial implementation targets
+x86-64 terminal applications and X11 core clients, not arbitrary Linux software:
+there is no Wayland, fork/exec process tree, writable Linux root filesystem,
+network socket stack, or X11 extension support. Unsupported kernel operations
+return Linux error codes. Linux compatibility is not available in the 32-bit
+kernel. Linux user mappings cannot overlap the kernel, which is linked at
+16 MiB in the 64-bit build.
+
+For boot-driven acceptance checks, build with
+`LINUX_CMDLINE=linux_test=busybox` or `LINUX_CMDLINE=linux_test=xeyes` in the
+command above. Inspect COM1 output for `linux-ok` and `[linux] exit 0` for
+BusyBox; inspect the actual QEMU framebuffer for the xeyes window.
+The planar-image regression test runs independently of QEMU:
+
+```sh
+gcc -std=c11 -Wall -Wextra -Iinclude tests/linux_x11_host_test.c \
+    src/kernel/linux_x11.c -o build/linux_x11_host_test
+build/linux_x11_host_test
+```
+
+Verified in QEMU: upstream BusyBox 1.35.0 prints `linux-ok` and exits 0;
+Alpine xeyes 1.3.0 displays its eyes using the guest X11 server. Xlib may
+print a nonfatal missing `XInputExtension` warning because extensions are
+not advertised.
+
 Original RockOS readme below:
 
 # RockOS

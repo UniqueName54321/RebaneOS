@@ -76,7 +76,9 @@ ASM32_SOURCES = src/arch/i386/boot32.S \
 			  src/arch/i386/context32_switch.S \
 			  src/drivers/error_sound.S
 
-OBJS64 = $(ASM64_SOURCES:.S=.o) $(C_SOURCES:.c=.o)
+LINUX_SOURCES = src/kernel/linux_compat.c src/kernel/linux_x11.c
+
+OBJS64 = $(ASM64_SOURCES:.S=.o) $(C_SOURCES:.c=.o) $(LINUX_SOURCES:.c=.o) src/arch/x86_64/linux_entry.o
 # NOTE: error_sound.S is shared; 32-bit uses error_sound.32.o to avoid
 # clobbering the 64-bit error_sound.o. i386 arch objects live in their
 # own directory so plain .o is safe there.
@@ -228,5 +230,29 @@ run-installed: $(INSTALL_DISK) $(DATA_DISK)
 
 clean:
 	rm -f $(OBJS64) $(OBJS32) $(KERNEL64_BIN) $(KERNEL32_BIN) $(KERNEL_BIN) $(ISO_IMAGE) $(INSTALL_MODULE) $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI $(INSTALL_IMAGE) $(UI_ASSETS)
+
+# Optional Linux application image; no host packages are installed.
+linux-root:
+	$(PYTHON) scripts/prepare-linux-root.py
+
+linux-iso: $(ISO_IMAGE) build/linux-root.tar
+	mkdir -p build/linux-iso/boot
+	cp -R $(ISO_DIR)/. build/linux-iso/
+	cp build/linux-root.tar build/linux-iso/boot/linux-root.tar
+	printf '%s\n' 'timeout: 0' '/RebaneOS Linux compatibility (64-bit)' \
+		'    protocol: multiboot1' '    kernel_path: boot():/boot/rockos.bin' \
+		'    resolution: 1024x768x32' '    textmode: no' \
+		'    module_path: boot():/boot/linux-root.tar' \
+		'    module_string: REBANE_LINUX_ROOT' \
+		'    cmdline: $(LINUX_CMDLINE)' > build/linux-iso/boot/limine.conf
+	xorriso -as mkisofs -R -r -J -b boot/limine-bios-cd.bin \
+		-no-emul-boot -boot-load-size 4 -boot-info-table \
+		--efi-boot boot/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+		-o build/rebane-linux.iso build/linux-iso
+
+build/linux-root.tar: scripts/prepare-linux-root.py
+	$(PYTHON) $<
+
+.PHONY: linux-root linux-iso
 
 .PHONY: all run run-installed clean kernel32

@@ -21,6 +21,9 @@
 #include "rok.h"
 #include "pe_run.h"
 #include "pe_sample32.h"
+#ifndef ROCKOS_ARCH_32
+#include "linux_compat.h"
+#endif
 
 /* Builtin sample .rok: validates the self-contained demo path
  * (`run builtin`). Payload prints 'R' through the layer 0 syscall and
@@ -2593,6 +2596,9 @@ static void shell_print_help(void) {
     shell_write("ring3fault Trigger the isolated Ring 3 fault test\n");
     shell_write("run path  Run a RockOS native .rok executable (or `run builtin` for the demo)\n");
     shell_write("runexe path  Launch a PE32 .exe image (or `runexe builtin` for the demo); no imports yet\n");
+#ifndef ROCKOS_ARCH_32
+    shell_write("runlinux path [args]  Run an unmodified x86-64 Linux ELF binary\n");
+#endif
     shell_write("installer Check for a safe dedicated install disk\n");
     shell_write("version   Show RockOS version and kernel identity\n");
     shell_write("sysinfo   Show a compact system summary\n");
@@ -2761,6 +2767,24 @@ static void shell_execute(void) {
         }
         shell_draw_screen();
         return;
+#ifndef ROCKOS_ARCH_32
+    } else if (shell_get_path_and_text(command_buffer, "runlinux", argument,
+        sizeof(argument), &text)) {
+        if (!linux_compat_launch(argument, text)) {
+            shell_write("runlinux: unable to launch Linux executable\n");
+        } else {
+            task_yield();
+        }
+        return;
+    } else if (shell_get_argument(command_buffer, "runlinux", argument,
+        sizeof(argument))) {
+        if (!linux_compat_launch(argument, "")) {
+            shell_write("runlinux: unable to launch Linux executable\n");
+        } else {
+            task_yield();
+        }
+        return;
+#endif
     } else if (shell_get_argument(command_buffer, "runexe", argument,
         sizeof(argument))) {
         shell_draw_screen();
