@@ -6,7 +6,7 @@
 #include "pmm.h"
 #include "serial.h"
 #include "timer.h"
-#include "ui_assets.h"
+#include <ui_assets.h>
 
 #include <stddef.h>
 #include <stdint.h>

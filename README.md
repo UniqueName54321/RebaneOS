@@ -38,11 +38,11 @@ linker do not produce the required ELF kernels. Set `CC` and `LD` to override
 the compiler and linker. Set `LIMINE_TOOL` and `LIMINE_DATA_DIR` if Limine is
 not installed in its default locations.
 
-These scripts use the checked-in `src/drivers/ui_assets.h` instead of
-regenerating it with the Windows-only asset generator. If it is missing (for
-example, after `make clean`), restore it with
-`git restore src/drivers/ui_assets.h` before building. Changes to the font or
-logo require regenerating the atlas on Windows.
+The Unix build requires Python 3 with Pillow (`python-pillow` on Arch Linux,
+or `python3-pil` on Debian/Ubuntu). It regenerates the logo from
+`assets/rockos-logo-outlined.png` into `build/ui_assets.h`, preserving the
+checked-in font atlas in `src/drivers/ui_assets.h`. Font changes still require
+regenerating the atlas on Windows.
 
 The `make run` instructions below use Windows-specific QEMU audio settings;
 the Unix scripts only build the ISO.

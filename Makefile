@@ -16,13 +16,14 @@ CC32  = $(TARGET32)-gcc -m32
 LD32  = $(TARGET32)-ld
 ASM32 = $(TARGET32)-gcc -m32
 
-CFLAGS64 = -O2 -ffreestanding -mcmodel=large -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fno-builtin -fno-stack-protector -Wall -Wextra -Iinclude -DAUDIO_BOOT_TEST_TONE=$(AUDIO_BOOT_TEST_TONE) -DROCKOS_ARCH_64=1 -c
-CFLAGS32 = -O2 -ffreestanding -march=i586 -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fno-builtin -fno-stack-protector -fno-pic -fno-pie -Wall -Wextra -Iinclude -DAUDIO_BOOT_TEST_TONE=$(AUDIO_BOOT_TEST_TONE) -DROCKOS_ARCH_32=1 -c
+CFLAGS64 = -O2 -ffreestanding -mcmodel=large -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fno-builtin -fno-stack-protector -Wall -Wextra -Iinclude -I$(UI_ASSET_INCLUDE) -DAUDIO_BOOT_TEST_TONE=$(AUDIO_BOOT_TEST_TONE) -DROCKOS_ARCH_64=1 -c
+CFLAGS32 = -O2 -ffreestanding -march=i586 -mno-mmx -mno-sse -mno-sse2 -mno-80387 -fno-builtin -fno-stack-protector -fno-pic -fno-pie -Wall -Wextra -Iinclude -I$(UI_ASSET_INCLUDE) -DAUDIO_BOOT_TEST_TONE=$(AUDIO_BOOT_TEST_TONE) -DROCKOS_ARCH_32=1 -c
 ASMFLAGS = -Iinclude -c
 LDFLAGS64 = -m elf_x86_64 -T linker.ld
 LDFLAGS32 = -m elf_i386 -T linker32.ld
 POWERSHELL ?= powershell.exe
-UI_ASSETS = src/drivers/ui_assets.h
+UI_ASSETS ?= src/drivers/ui_assets.h
+UI_ASSET_INCLUDE ?= src/drivers
 UI_FONT = assets/selawik/selawk.ttf
 UI_FONT_LICENSE = assets/selawik/OFL.txt
 
@@ -131,12 +132,15 @@ src/drivers/error_sound.o: assets/error_48000_stereo_s16le.pcm
 src/drivers/error_sound.32.o: assets/error_48000_stereo_s16le.pcm
 	$(ASM32) $(ASMFLAGS) src/drivers/error_sound.S -o $@
 
-$(UI_ASSETS): $(UI_FONT) $(UI_FONT_LICENSE) assets/rockos-logo-outlined.png scripts/generate_ui_assets.ps1
+src/drivers/ui_assets.h: $(UI_FONT) $(UI_FONT_LICENSE) assets/rockos-logo-outlined.png scripts/generate_ui_assets.ps1
 	$(POWERSHELL) -NoProfile -ExecutionPolicy Bypass \
 		-File scripts/generate_ui_assets.ps1 \
 		-FontPath $(UI_FONT) \
 		-LogoPath assets/rockos-logo-outlined.png \
 		-OutputPath $(UI_ASSETS)
+
+build/ui_assets.h: src/drivers/ui_assets.h assets/rockos-logo-outlined.png scripts/generate_logo.py
+	$(PYTHON) scripts/generate_logo.py assets/rockos-logo-outlined.png src/drivers/ui_assets.h $@
 
 src/drivers/display.o: $(UI_ASSETS)
 src/drivers/display.32.o: $(UI_ASSETS)
