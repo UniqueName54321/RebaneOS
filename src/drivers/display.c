@@ -2,6 +2,7 @@
 
 #include "io.h"
 #include "multiboot1.h"
+#include "framebuffer_layout.h"
 #include "paging.h"
 #include "pmm.h"
 #include "serial.h"
@@ -693,32 +694,13 @@ bool display_init_framebuffer(uintptr_t boot_info_address) {
         (uint64_t)info->framebuffer_width * bytes_per_pixel;
     uint64_t framebuffer_bytes =
         (uint64_t)info->framebuffer_pitch * info->framebuffer_height;
-    uint8_t color_positions[3] = {
-        info->framebuffer_color_info[0],
-        info->framebuffer_color_info[2],
-        info->framebuffer_color_info[4]
-    };
-    uint8_t color_sizes[3] = {
-        info->framebuffer_color_info[1],
-        info->framebuffer_color_info[3],
-        info->framebuffer_color_info[5]
-    };
-    uint8_t missing_color_masks = 0;
-    uint8_t missing_color_index = 0;
-    for (uint8_t index = 0; index < 3; index++) {
-        if (color_sizes[index] == 0) {
-            missing_color_masks++;
-            missing_color_index = index;
-        }
-    }
-    if (info->framebuffer_bpp == 32 && missing_color_masks == 1 &&
-        color_sizes[(missing_color_index + 1) % 3] == 8 &&
-        color_sizes[(missing_color_index + 2) % 3] == 8 &&
-        color_positions[missing_color_index] <= 24) {
-        color_sizes[missing_color_index] = 8;
-        serial_write_string("[fb] inferred missing 8-bit RGB mask at bit ");
-        serial_write_dec(color_positions[missing_color_index]);
-        serial_write_string("\n");
+    uint8_t color_positions[3], color_sizes[3];
+    const uint8_t* color_bytes = (const uint8_t*)info +
+        offsetof(multiboot1_info_t, framebuffer_color_info);
+    if (!framebuffer_decode_rgb(color_bytes, 8, info->framebuffer_bpp,
+            color_positions, color_sizes)) {
+        framebuffer_status = "invalid framebuffer RGB masks";
+        return false;
     }
     serial_write_string("[fb] minimum_pitch=");
     serial_write_dec(minimum_pitch);
@@ -735,27 +717,8 @@ bool display_init_framebuffer(uintptr_t boot_info_address) {
     serial_write_string("\n");
     if (info->framebuffer_pitch < minimum_pitch ||
         framebuffer_bytes == 0 || framebuffer_bytes > FRAMEBUFFER_MAX_BYTES ||
-        info->framebuffer_addr > UINT64_MAX - framebuffer_bytes ||
-        color_sizes[0] == 0 || color_sizes[1] == 0 || color_sizes[2] == 0 ||
-        color_sizes[0] > 8 || color_sizes[1] > 8 || color_sizes[2] > 8 ||
-        (uint16_t)color_positions[0] + color_sizes[0] >
-            info->framebuffer_bpp ||
-        (uint16_t)color_positions[1] + color_sizes[1] >
-            info->framebuffer_bpp ||
-        (uint16_t)color_positions[2] + color_sizes[2] >
-            info->framebuffer_bpp) {
+        info->framebuffer_addr > UINT64_MAX - framebuffer_bytes) {
         framebuffer_status = "invalid framebuffer layout";
-        return false;
-    }
-    uint32_t color_masks[3];
-    for (uint8_t index = 0; index < 3; index++) {
-        color_masks[index] = ((1U << color_sizes[index]) - 1U) <<
-            color_positions[index];
-    }
-    if ((color_masks[0] & color_masks[1]) ||
-        (color_masks[0] & color_masks[2]) ||
-        (color_masks[1] & color_masks[2])) {
-        framebuffer_status = "overlapping RGB channels";
         return false;
     }
 
@@ -816,6 +779,42 @@ bool display_get_framebuffer_size(uint32_t* width, uint32_t* height) {
     if (!framebuffer_active || !width || !height) return false;
     *width = framebuffer_width;
     *height = framebuffer_height;
+    return true;
+}
+
+bool display_write_xrgb(uint64_t byte_offset, const uint32_t* pixels,
+    uint32_t pixel_count) {
+    if (!framebuffer_active || !framebuffer_shadow || !pixels ||
+        (byte_offset & 3)) return false;
+    uint64_t first = byte_offset / 4;
+    uint64_t total = (uint64_t)framebuffer_width * framebuffer_height;
+    if (first > total || pixel_count > total - first) return false;
+    while (pixel_count) {
+        uint32_t x = first % framebuffer_width;
+        uint32_t y = first / framebuffer_width;
+        uint32_t span = framebuffer_width - x;
+        if (span > pixel_count) span = pixel_count;
+        if (framebuffer_bytes_per_pixel == 4 &&
+            framebuffer_red_position == 16 && framebuffer_red_size == 8 &&
+            framebuffer_green_position == 8 && framebuffer_green_size == 8 &&
+            framebuffer_blue_position == 0 && framebuffer_blue_size == 8) {
+            uint32_t* destination = (uint32_t*)(void*)(framebuffer_shadow +
+                (size_t)y * framebuffer_pitch + (size_t)x * 4);
+            for (uint32_t n = 0; n < span; n++) destination[n] = pixels[n];
+        } else {
+            for (uint32_t n = 0; n < span; n++) {
+                uint32_t rgb = pixels[n];
+                uint32_t native = channel_value(rgb >> 16, framebuffer_red_position, framebuffer_red_size) |
+                    channel_value(rgb >> 8, framebuffer_green_position, framebuffer_green_size) |
+                    channel_value(rgb, framebuffer_blue_position, framebuffer_blue_size);
+                put_pixel_untracked(x + n, y, native);
+            }
+        }
+        mark_framebuffer_dirty_rect(x, y, span, 1);
+        pixels += span;
+        first += span;
+        pixel_count -= span;
+    }
     return true;
 }
 

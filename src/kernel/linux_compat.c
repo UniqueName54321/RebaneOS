@@ -5,6 +5,8 @@
 #include "gdt.h"
 #include "io.h"
 #include "keyboard.h"
+#include "mouse.h"
+#include "net_socket.h"
 #include "multiboot1.h"
 #include "paging.h"
 #include "pmm.h"
@@ -18,12 +20,12 @@
 #define USER_LIMIT 0x0000800000000000ULL
 #define MAP_BASE 0x0000006000000000ULL
 #define STACK_TOP 0x00007ffffff00000ULL
-#define STACK_SIZE (256 * 1024ULL)
-#define FD_COUNT 64
+#define STACK_SIZE (4 * 1024 * 1024ULL)
+#define FD_COUNT 128
 #define PATH_SIZE 256
 #define ARG_SIZE 1024
 #define MAX_ARGS 48
-#define MAX_MEMORY (192 * 1024 * 1024ULL)
+#define MAX_MEMORY (512 * 1024 * 1024ULL)
 #define AT_FDCWD (-100)
 
 enum { EPERM=1, ENOENT=2, EINTR=4, EIO=5, EBADF=9, EAGAIN=11,
@@ -33,7 +35,7 @@ enum { EPERM=1, ENOENT=2, EINTR=4, EIO=5, EBADF=9, EAGAIN=11,
     ENOPROTOOPT=92, EOPNOTSUPP=95, EAFNOSUPPORT=97, ENOTCONN=107,
     ETIMEDOUT=110, ECONNREFUSED=111 };
 enum { FILE_REG=1, FILE_DIR, FILE_TTY, FILE_NULL, FILE_ZERO, FILE_RANDOM,
-    FILE_SOCKET };
+    FILE_SOCKET, FILE_BROWSER_FB, FILE_BROWSER_INPUT };
 
 typedef struct {
     const unsigned char* data;
@@ -48,6 +50,8 @@ typedef struct {
     unsigned flags;
     unsigned references;
     bool connected;
+    unsigned domain, socket_type;
+    int network_handle;
 } open_file_t;
 typedef struct { int handle; unsigned flags; } descriptor_t;
 typedef struct { uint64_t handler, flags, restorer, mask; } signal_action_t;
@@ -102,6 +106,16 @@ static uint64_t memory_bytes, next_mapping, program_break, initial_break;
 static uint64_t clear_tid;
 static bool cpu_has_rdrand;
 static uint64_t entropy_state;
+static bool browser_session;
+static bool wall_clock_valid;
+static uint64_t wall_clock_seconds, wall_clock_ticks;
+/* One Linux process executes syscalls at a time; do not put UDP payloads on
+ * the 16 KiB kernel task stack. */
+static unsigned char socket_buffer[65536];
+typedef struct { uint32_t type, code; int32_t x, y; } browser_event_t;
+static browser_event_t browser_events[64];
+static unsigned browser_event_read, browser_event_write;
+static input_mouse_state_t browser_mouse;
 extern char __kernel_start[], __kernel_end[];
 extern void linux_syscall_entry(void);
 extern void linux_enter(uintptr_t entry, uintptr_t stack, uintptr_t root)
@@ -134,6 +148,111 @@ static bool text_copy(char* to, const char* from, size_t capacity) {
 static uint64_t page_up(uint64_t value) { return (value + PAGE - 1) & ~(PAGE - 1); }
 static uint64_t page_down(uint64_t value) { return value & ~(PAGE - 1); }
 static uint64_t ms_ticks(uint64_t ms) { return ms / 10 + (ms % 10 != 0); }
+
+static uint8_t cmos_read(uint8_t reg) {
+    outb(0x70, reg | 0x80);
+    return inb(0x71);
+}
+static bool rtc_sample(uint8_t value[8]) {
+    unsigned spins = 100000;
+    while ((cmos_read(0x0a) & 0x80) && --spins) {}
+    if (!spins) return false;
+    const uint8_t registers[8] = {0, 2, 4, 7, 8, 9, 0x32, 0x0b};
+    for (unsigned n = 0; n < 8; n++) value[n] = cmos_read(registers[n]);
+    return !(cmos_read(0x0a) & 0x80);
+}
+static unsigned rtc_decimal(uint8_t value, bool binary) {
+    return binary ? value : (value & 15) + (value >> 4) * 10;
+}
+static bool leap_year(unsigned year) {
+    return !(year % 4) && (year % 100 || !(year % 400));
+}
+static void initialize_wall_clock(void) {
+    uint8_t first[8], second[8];
+    bool stable = false;
+    uint64_t flags = save_irq_disable();
+    uint8_t saved_index = inb(0x70);
+    for (unsigned attempt = 0; attempt < 8 && !stable; attempt++) {
+        if (!rtc_sample(first) || !rtc_sample(second)) continue;
+        stable = true;
+        for (unsigned n = 0; n < 8; n++)
+            if (first[n] != second[n]) stable = false;
+    }
+    outb(0x70, saved_index);
+    restore_irq(flags);
+    if (!stable) return;
+    bool binary = (second[7] & 4) != 0;
+    unsigned sec = rtc_decimal(second[0], binary);
+    unsigned min = rtc_decimal(second[1], binary);
+    unsigned hour = rtc_decimal(second[2] & 0x7f, binary);
+    if (!(second[7] & 2)) hour = hour % 12 + ((second[2] & 0x80) ? 12 : 0);
+    unsigned day = rtc_decimal(second[3], binary);
+    unsigned month = rtc_decimal(second[4], binary);
+    unsigned year = rtc_decimal(second[5], binary);
+    unsigned century = rtc_decimal(second[6], binary);
+    year += (century >= 19 && century <= 99 ? century : 20) * 100;
+    static const unsigned days_in_month[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (year < 1970 || month < 1 || month > 12 || day < 1 ||
+        day > days_in_month[month - 1] + (month == 2 && leap_year(year)) ||
+        hour > 23 || min > 59 || sec > 59) return;
+    uint64_t days = 0;
+    for (unsigned y = 1970; y < year; y++) days += leap_year(y) ? 366 : 365;
+    for (unsigned m = 1; m < month; m++)
+        days += days_in_month[m - 1] + (m == 2 && leap_year(year));
+    wall_clock_seconds = ((days + day - 1) * 24 + hour) * 3600 + min * 60 + sec;
+    wall_clock_ticks = timer_get_ticks();
+    wall_clock_valid = true;
+}
+static uint64_t realtime_ticks(void) {
+    return wall_clock_seconds * 100 + timer_get_ticks() - wall_clock_ticks;
+}
+static void browser_queue(uint32_t type, uint32_t code, int32_t x, int32_t y) {
+    if (browser_event_write - browser_event_read >= 64) return;
+    browser_events[browser_event_write++ % 64] = (browser_event_t){type, code, x, y};
+}
+static unsigned mouse_buttons(const input_mouse_state_t* mouse) {
+    return mouse->left_btn | (mouse->right_btn ? 2 : 0) | (mouse->middle_btn ? 4 : 0);
+}
+static void browser_collect_input(void) {
+    if (!browser_session) return;
+    input_key_event_t key;
+    while (browser_event_write - browser_event_read < 60 && keyboard_get_event(&key)) {
+        unsigned code = (unsigned char)key.ascii;
+        if (code == '\n') code = '\r';
+        if (!code) {
+            code = key.scancode;
+            if (key.is_extended) {
+                switch (key.scancode) {
+                case 0x4b: code = 105; break;
+                case 0x4d: code = 106; break;
+                case 0x48: code = 103; break;
+                case 0x50: code = 108; break;
+                case 0x47: code = 102; break;
+                case 0x4f: code = 107; break;
+                case 0x49: code = 104; break;
+                case 0x51: code = 109; break;
+                case 0x52: code = 110; break;
+                case 0x53: code = 111; break;
+                }
+            }
+            code |= 0x10000;
+        }
+        browser_queue(1, code, key.is_pressed, key.modifiers);
+    }
+    if (browser_event_write - browser_event_read > 60) return;
+    input_mouse_state_t mouse;
+    mouse_get_state(&mouse);
+    unsigned buttons = mouse_buttons(&mouse);
+    if (mouse.left_press_count != browser_mouse.left_press_count)
+        browser_queue(2, buttons | 1, mouse.press_x, mouse.press_y);
+    if (mouse.left_release_count != browser_mouse.left_release_count)
+        browser_queue(2, buttons & ~1U, mouse.x, mouse.y);
+    if (mouse.x != browser_mouse.x || mouse.y != browser_mouse.y ||
+        buttons != mouse_buttons(&browser_mouse))
+        browser_queue(2, buttons, mouse.x, mouse.y);
+    browser_mouse = mouse;
+    display_set_mouse_position(mouse.x, mouse.y);
+}
 static void log_text(const char* text) {
     serial_write_string(text);
     display_puts(text);
@@ -291,6 +410,15 @@ static int find_file_depth(const char* path, guest_file_t* file, unsigned depth)
     else if (text_equal(normalized, "/dev/zero")) file->kind = FILE_ZERO;
     else if (text_equal(normalized, "/dev/urandom") || text_equal(normalized, "/dev/random")) file->kind = FILE_RANDOM;
     else if (text_equal(normalized, "/dev/tty") || text_equal(normalized, "/dev/console")) file->kind = FILE_TTY;
+    else if (text_equal(normalized, "/dev/rebane-fb")) {
+        uint32_t width, height;
+        if (!browser_session || !display_get_framebuffer_size(&width, &height)) return -ENODEV;
+        file->kind = FILE_BROWSER_FB;
+        file->size = (uint64_t)width * height * 4;
+    } else if (text_equal(normalized, "/dev/rebane-input")) {
+        if (!browser_session) return -ENODEV;
+        file->kind = FILE_BROWSER_INPUT;
+    }
     if (file->kind) { file->mode = 0020666; return 0; }
     for (size_t offset = 0; root_archive && offset + 512 <= root_archive_size;) {
         const unsigned char* header = root_archive + offset;
@@ -366,7 +494,10 @@ static long fd_close(long fd) {
     open_file_t* file = fd_get(fd);
     if (!file) return -EBADF;
     file->references--;
-    if (!file->references && file->file.kind == FILE_SOCKET && file->connected) linux_x11_reset();
+    if (!file->references && file->file.kind == FILE_SOCKET) {
+        if (file->domain == 2) net_close(file->network_handle);
+        else if (file->connected) linux_x11_reset();
+    }
     descriptors[fd].handle = -1;
     descriptors[fd].flags = 0;
     return 0;
@@ -537,6 +668,8 @@ static void release_user_pages(uint64_t* table, unsigned level) {
 static void finish(int status) __attribute__((noreturn));
 static void finish(int status) {
     paging_restore_kernel_address_space();
+    for (unsigned fd = 0; fd < FD_COUNT; fd++)
+        if (fd_get(fd)) fd_close(fd);
     if (clear_tid) { uint32_t empty = 0; user_copy(&empty, clear_tid, sizeof(empty), true); }
     write_msr(0xC0000100, 0);
     write_msr(0xC0000101, 0);
@@ -547,6 +680,7 @@ static void finish(int status) {
     linux_user_cr3 = 0;
     linux_x11_reset();
     session_active = false;
+    browser_session = false;
     session_pid = 0;
     serial_write_string("[linux] exit ");
     serial_write_dec((uint32_t)status);
@@ -684,6 +818,7 @@ static bool initial_stack(const loaded_elf_t* main, uint64_t interpreter_base, u
 }
 void linux_compat_init(uintptr_t boot_info_address) {
     linux_kernel_cr3 = paging_kernel_address_space();
+    initialize_wall_clock();
     if (!boot_info_address) return;
     const multiboot1_info_t* info = (void*)boot_info_address;
     if (!(info->flags & MULTIBOOT1_INFO_MODULES)) return;
@@ -712,6 +847,38 @@ bool linux_compat_launch(const char* path, const char* arguments) {
     task_t* task = task_create("linux", linux_compat_task);
     if (!task) { session_active = false; return false; }
     session_pid = task->pid;
+    return true;
+}
+
+static char* append_decimal(char* output, unsigned value) {
+    char reversed[10];
+    unsigned count = 0;
+    do { reversed[count++] = '0' + value % 10; value /= 10; } while (value);
+    while (count) *output++ = reversed[--count];
+    *output = 0;
+    return output;
+}
+bool linux_browser_active(void) { return browser_session && session_active; }
+bool linux_browser_launch(const char* url) {
+    uint32_t width, height;
+    if (!url || !*url) url = "https://example.com";
+    if (session_active || !display_get_framebuffer_size(&width, &height) ||
+        text_length(url) > ARG_SIZE - 80) return false;
+    for (const char* p = url; *p; p++) if ((unsigned char)*p <= 32) return false;
+    char arguments[ARG_SIZE];
+    text_copy(arguments, "-f rebane -w ", sizeof(arguments));
+    char* end = append_decimal(arguments + text_length(arguments), width);
+    text_copy(end, " -h ", 5);
+    end = append_decimal(end + 4, height);
+    *end++ = ' ';
+    text_copy(end, url, sizeof(arguments) - (end - arguments));
+    browser_session = true;
+    browser_event_read = browser_event_write = 0;
+    mouse_get_state(&browser_mouse);
+    if (!linux_compat_launch("/usr/bin/netsurf", arguments)) {
+        browser_session = false;
+        return false;
+    }
     return true;
 }
 void linux_compat_task(void) {
@@ -781,10 +948,178 @@ void linux_compat_task(void) {
     linux_enter(entry, stack, linux_user_cr3);
 }
 
+typedef struct {
+    uint16_t family, port;
+    uint32_t address;
+    unsigned char padding[8];
+} linux_inet_address_t;
+
+static long socket_address_in(uint64_t address, uint32_t length,
+    linux_inet_address_t* inet) {
+    if (length < sizeof(*inet)) return -EINVAL;
+    if (!user_copy(inet, address, sizeof(*inet), false)) return -EFAULT;
+    return inet->family == 2 ? 0 : -EAFNOSUPPORT;
+}
+static long socket_address_out(uint64_t address, uint64_t length_address,
+    const void* name, uint32_t size) {
+    uint32_t capacity;
+    if (!user_copy(&capacity, length_address, 4, false)) return -EFAULT;
+    uint32_t used = capacity < size ? capacity : size;
+    if (!user_copy((void*)name, address, used, true) ||
+        !user_copy(&size, length_address, 4, true)) return -EFAULT;
+    return 0;
+}
+static unsigned descriptor_events(open_file_t* file) {
+    if (file->file.kind == FILE_SOCKET) {
+        if (file->domain == 2) return net_events(file->network_handle);
+        return file->connected ? 4 | (linux_x11_available() ? 1 : 0) : 16;
+    }
+    if (file->file.kind == FILE_BROWSER_INPUT) {
+        browser_collect_input();
+        return browser_event_write != browser_event_read ? 1 : 0;
+    }
+    if (file->file.kind == FILE_TTY) return 4;
+    return 5;
+}
+static long socket_buffer_io(open_file_t* file, size_t length, unsigned flags,
+    bool writing, linux_inet_address_t* peer) {
+    if (flags & ~(0x40U | 0x4000U | (writing ? 0U : 2U))) return -EOPNOTSUPP;
+    if (file->domain != 2 && (peer || (flags & 2))) return -EOPNOTSUPP;
+    for (;;) {
+        net_poll();
+        long result;
+        if (file->domain == 2) {
+            if (writing) {
+                result = peer ? net_sendto(file->network_handle, socket_buffer,
+                    length, peer->address, peer->port) :
+                    net_send(file->network_handle, socket_buffer, length);
+            } else if (flags & 2) {
+                result = net_peek(file->network_handle, socket_buffer, length);
+                if (result >= 0 && peer)
+                    net_peername(file->network_handle, &peer->address, &peer->port);
+            } else {
+                result = net_recvfrom(file->network_handle, socket_buffer, length,
+                    peer ? &peer->address : NULL, peer ? &peer->port : NULL);
+            }
+        } else {
+            if (!file->connected) return -ENOTCONN;
+            result = writing ? linux_x11_write(socket_buffer, length) :
+                linux_x11_read(socket_buffer, length);
+        }
+        if (result != -EAGAIN || (file->flags & 04000) || (flags & 0x40)) return result;
+        task_sleep_ticks(1);
+    }
+}
+static long socket_transfer(long fd, uint64_t address, uint64_t length,
+    unsigned flags, bool writing, uint64_t peer_address, uint64_t peer_length) {
+    open_file_t* file = fd_get(fd);
+    if (!file) return -EBADF;
+    if (file->file.kind != FILE_SOCKET) return -ENOTSOCK;
+    if (!user_valid(address, length, !writing)) return -EFAULT;
+    linux_inet_address_t peer;
+    zero(&peer, sizeof(peer));
+    peer.family = 2;
+    if (peer_address) {
+        if (file->domain != 2) return -EOPNOTSUPP;
+        if (writing) {
+            long result = socket_address_in(peer_address, peer_length, &peer);
+            if (result < 0) return result;
+        } else {
+            uint32_t capacity;
+            if (!user_copy(&capacity, peer_length, 4, false) ||
+                !user_valid(peer_length, 4, true) ||
+                !user_valid(peer_address, capacity < sizeof(peer) ? capacity : sizeof(peer), true))
+                return -EFAULT;
+        }
+    }
+    if (file->socket_type == 2 && writing && length > 65507) return -90;
+    if (length > sizeof(socket_buffer)) length = sizeof(socket_buffer);
+    if (writing && !user_copy(socket_buffer, address, length, false)) return -EFAULT;
+    long result = socket_buffer_io(file, length, flags, writing, peer_address ? &peer : NULL);
+    if (result < 0) return result;
+    if (!writing) {
+        if (!user_copy(socket_buffer, address, result, true)) return -EFAULT;
+        if (peer_address && socket_address_out(peer_address, peer_length, &peer, sizeof(peer)) < 0)
+            return -EFAULT;
+    }
+    return result;
+}
+static long socket_vectors(open_file_t* file, uint64_t vectors, uint64_t count,
+    unsigned flags, bool writing, linux_inet_address_t* peer) {
+    if (count > 1024 || !user_valid(vectors, count * sizeof(linux_iovec_t), false))
+        return count > 1024 ? -EINVAL : -EFAULT;
+    uint64_t size = 0;
+    for (uint64_t n = 0; n < count; n++) {
+        linux_iovec_t vector;
+        user_copy(&vector, vectors + n * sizeof(vector), sizeof(vector), false);
+        if (vector.length > 0x7ffff000 - size) return -EINVAL;
+        if (!user_valid(vector.base, vector.length, !writing)) return -EFAULT;
+        if (writing && size < sizeof(socket_buffer)) {
+            size_t used = vector.length;
+            if (used > sizeof(socket_buffer) - size) used = sizeof(socket_buffer) - size;
+            user_copy(socket_buffer + size, vector.base, used, false);
+        }
+        size += vector.length;
+    }
+    if (file->socket_type == 2 && writing && size > 65507) return -90;
+    if (size > sizeof(socket_buffer)) size = sizeof(socket_buffer);
+    long result = socket_buffer_io(file, size, flags, writing, peer);
+    if (result <= 0 || writing) return result;
+    uint64_t done = 0;
+    for (uint64_t n = 0; n < count && done < (uint64_t)result; n++) {
+        linux_iovec_t vector;
+        user_copy(&vector, vectors + n * sizeof(vector), sizeof(vector), false);
+        size_t used = vector.length;
+        if (used > (uint64_t)result - done) used = result - done;
+        user_copy(socket_buffer + done, vector.base, used, true);
+        done += used;
+    }
+    return result;
+}
+static long framebuffer_write(open_file_t* file, uint64_t input,
+    uint64_t length, uint64_t offset, bool positioned) {
+    if ((offset & 3) || (length & 3)) return -EINVAL;
+    if (offset > file->file.size) return -ENOSPC;
+    if (length > file->file.size - offset) length = file->file.size - offset;
+    if (!user_valid(input, length, false)) return -EFAULT;
+    uint32_t pixels[PAGE / 4];
+    uint64_t done = 0;
+    while (done < length) {
+        size_t chunk = length - done;
+        if (chunk > sizeof(pixels)) chunk = sizeof(pixels);
+        if (!user_copy(pixels, input + done, chunk, false)) return -EFAULT;
+        if (!display_write_xrgb(offset + done, pixels, chunk / 4)) return -EIO;
+        done += chunk;
+    }
+    if (!positioned) file->offset = offset + done;
+    return done;
+}
+
 static long read_descriptor(long fd, uint64_t output, uint64_t length, bool positioned, uint64_t offset) {
     open_file_t* file = fd_get(fd);
     if (!file) return -EBADF;
     if ((file->flags & 3) == 1) return -EBADF;
+    if (file->file.kind == FILE_SOCKET)
+        return positioned ? -ESPIPE : socket_transfer(fd, output, length, 0, false, 0, 0);
+    if (file->file.kind == FILE_BROWSER_INPUT) {
+        if (positioned) return -ESPIPE;
+        if (length < sizeof(browser_event_t)) return -EINVAL;
+        browser_collect_input();
+        while (browser_event_read == browser_event_write) {
+            if (file->flags & 04000) return -EAGAIN;
+            net_poll();
+            task_sleep_ticks(1);
+            browser_collect_input();
+        }
+        uint64_t done = 0;
+        while (browser_event_read != browser_event_write && length - done >= sizeof(browser_event_t)) {
+            browser_event_t* event = &browser_events[browser_event_read % 64];
+            if (!user_copy(event, output + done, sizeof(*event), true)) return -EFAULT;
+            browser_event_read++;
+            done += sizeof(*event);
+        }
+        return done;
+    }
     if (length > 0x7ffff000) length = 0x7ffff000;
     if (!user_valid(output, length, true)) return -EFAULT;
     if (!length) return 0;
@@ -804,14 +1139,6 @@ static long read_descriptor(long fd, uint64_t output, uint64_t length, bool posi
             if (!cpu_has_rdrand) return total ? (long)total : -ENOSYS;
             if (!fill_entropy(buffer, chunk)) return total ? (long)total : -EAGAIN;
             result = chunk;
-            break;
-        case FILE_SOCKET:
-            if (!file->connected) return -ENOTCONN;
-            result = linux_x11_read(buffer, chunk);
-            while (result == -EAGAIN && !total && !(file->flags & 04000)) {
-                task_sleep_ticks(1);
-                result = linux_x11_read(buffer, chunk);
-            }
             break;
         case FILE_TTY: {
             input_key_event_t key;
@@ -833,14 +1160,18 @@ static long read_descriptor(long fd, uint64_t output, uint64_t length, bool posi
         if (!user_copy(buffer, output + total, result, true)) return -EFAULT;
         total += result;
         if (!positioned && file->file.kind == FILE_REG) file->offset += result;
-        if ((size_t)result < chunk || file->file.kind == FILE_SOCKET || file->file.kind == FILE_TTY) break;
+        if ((size_t)result < chunk || file->file.kind == FILE_TTY) break;
     }
     return total;
 }
 static long write_descriptor(long fd, uint64_t input, uint64_t length) {
     open_file_t* file = fd_get(fd);
     if (!file) return -EBADF;
-    if ((file->flags & 3) == 0 && file->file.kind != FILE_SOCKET) return -EBADF;
+    if (file->file.kind == FILE_SOCKET)
+        return socket_transfer(fd, input, length, 0, true, 0, 0);
+    if (file->file.kind == FILE_BROWSER_FB)
+        return (file->flags & 3) ? framebuffer_write(file, input, length, file->offset, false) : -EBADF;
+    if ((file->flags & 3) == 0) return -EBADF;
     if (length > 0x7ffff000) length = 0x7ffff000;
     if (!user_valid(input, length, false)) return -EFAULT;
     if (file->file.kind == FILE_REG || file->file.kind == FILE_DIR) return -EROFS;
@@ -851,23 +1182,20 @@ static long write_descriptor(long fd, uint64_t input, uint64_t length) {
         size_t chunk = length - total;
         if (chunk > sizeof(buffer) - 1) chunk = sizeof(buffer) - 1;
         if (!user_copy(buffer, input + total, chunk, false)) return -EFAULT;
-        long result;
-        if (file->file.kind == FILE_SOCKET) {
-            if (!file->connected) return -ENOTCONN;
-            result = linux_x11_write(buffer, chunk);
-        } else {
-            for (size_t n = 0; n < chunk; n++) display_putchar(buffer[n]);
-            buffer[chunk] = 0;
-            serial_write_string(buffer);
-            result = chunk;
-        }
-        if (result < 0) return total ? (long)total : result;
+        for (size_t n = 0; n < chunk; n++)
+            if (!browser_session) display_putchar(buffer[n]);
+        buffer[chunk] = 0;
+        serial_write_string(buffer);
+        long result = chunk;
         total += result;
         if ((size_t)result < chunk) break;
     }
     return total;
 }
 static long vector_io(long fd, uint64_t vectors, uint64_t count, bool writing) {
+    open_file_t* file = fd_get(fd);
+    if (!file) return -EBADF;
+    if (file->file.kind == FILE_SOCKET) return socket_vectors(file, vectors, count, 0, writing, NULL);
     if (count > 1024) return -EINVAL;
     if (!user_valid(vectors, count * sizeof(linux_iovec_t), false)) return -EFAULT;
     uint64_t total = 0;
@@ -880,10 +1208,6 @@ static long vector_io(long fd, uint64_t vectors, uint64_t count, bool writing) {
         if (result < 0) return total ? (long)total : result;
         total += result;
         if ((uint64_t)result < vector.length) break;
-        if (!writing && total) {
-            open_file_t* file = fd_get(fd);
-            if (file && file->file.kind == FILE_SOCKET && !linux_x11_available()) break;
-        }
     }
     return total;
 }
@@ -892,24 +1216,14 @@ static long poll_descriptors(uint64_t array, uint64_t count, int64_t timeout_ms)
     if (count > FD_COUNT || !user_valid(array, count * sizeof(item), true)) return -EFAULT;
     uint64_t start = timer_get_ticks();
     for (;;) {
+        net_poll();
         long ready = 0;
         for (uint64_t n = 0; n < count; n++) {
             user_copy(&item, array + n * sizeof(item), sizeof(item), false);
             item.revents = 0;
             open_file_t* file = fd_get(item.fd);
             if (item.fd >= 0 && !file) item.revents = 0x20;
-            else if (file) {
-                if (file->file.kind == FILE_SOCKET) {
-                    if (!file->connected) item.revents = 0x10;
-                    else {
-                        if ((item.events & 1) && linux_x11_available()) item.revents |= 1;
-                        if (item.events & 4) item.revents |= 4;
-                    }
-                } else {
-                    if ((item.events & 1) && file->file.kind != FILE_TTY) item.revents |= 1;
-                    if (item.events & 4) item.revents |= 4;
-                }
-            }
+            else if (file) item.revents = descriptor_events(file) & (item.events | 0x18);
             if (item.revents) ready++;
             user_copy(&item, array + n * sizeof(item), sizeof(item), true);
         }
@@ -948,18 +1262,20 @@ static long select_descriptors(uint64_t count, uint64_t read_address,
         zero(ready_reads, sizeof(ready_reads)); zero(ready_writes, sizeof(ready_writes));
         zero(ready_exceptions, sizeof(ready_exceptions));
         long ready = 0;
+        net_poll();
         for (uint64_t fd = 0; fd < count; fd++) {
             uint64_t bit = 1ULL << (fd & 63);
             unsigned word = fd / 64;
             if (!((reads[word] | writes[word] | exceptions[word]) & bit)) continue;
             open_file_t* file = fd_get(fd);
             if (!file) return -EBADF;
-            if ((reads[word] & bit) && (file->file.kind == FILE_SOCKET ?
-                    (!file->connected || linux_x11_available()) :
-                    file->file.kind != FILE_TTY)) {
+            unsigned events = descriptor_events(file);
+            if ((reads[word] & bit) && (events & (1 | 8 | 16))) {
                 ready_reads[word] |= bit; ready++;
             }
-            if (writes[word] & bit) { ready_writes[word] |= bit; ready++; }
+            if ((writes[word] & bit) && (events & (4 | 8 | 16))) {
+                ready_writes[word] |= bit; ready++;
+            }
         }
         uint64_t elapsed = timer_get_ticks() - start;
         if (ready || !duration || (duration > 0 && elapsed >= (uint64_t)duration)) {
@@ -982,16 +1298,31 @@ static long select_descriptors(uint64_t count, uint64_t read_address,
 static long socket_message(long fd, uint64_t address, unsigned flags, bool writing) {
     linux_message_t message;
     if (!user_copy(&message, address, sizeof(message), false)) return -EFAULT;
+    if (!writing && !user_valid(address, sizeof(message), true)) return -EFAULT;
     open_file_t* file = fd_get(fd);
     if (!file) return -EBADF;
     if (file->file.kind != FILE_SOCKET) return -ENOTSOCK;
     if (message.control_length && writing) return -EOPNOTSUPP;
-    unsigned old_flags = file->flags;
-    if (flags & 0x40) file->flags |= 04000;
-    long result = vector_io(fd, message.vectors, message.vector_count, writing);
-    file->flags = old_flags;
+    linux_inet_address_t peer;
+    zero(&peer, sizeof(peer));
+    peer.family = 2;
+    if (message.name) {
+        if (file->domain != 2) return -EOPNOTSUPP;
+        if (writing) {
+            long result = socket_address_in(message.name, message.name_length, &peer);
+            if (result < 0) return result;
+        } else if (!user_valid(message.name, message.name_length < sizeof(peer) ?
+                message.name_length : sizeof(peer), true)) return -EFAULT;
+    }
+    long result = socket_vectors(file, message.vectors, message.vector_count,
+        flags, writing, message.name ? &peer : NULL);
     if (!writing && result >= 0) {
-        message.name_length = message.control_length = message.flags = 0;
+        if (message.name) {
+            uint32_t used = message.name_length < sizeof(peer) ? message.name_length : sizeof(peer);
+            if (!user_copy(&peer, message.name, used, true)) return -EFAULT;
+            message.name_length = sizeof(peer);
+        } else message.name_length = 0;
+        message.control_length = message.flags = 0;
         if (!user_copy(&message, address, sizeof(message), true)) return -EFAULT;
     }
     return result;
@@ -999,8 +1330,22 @@ static long socket_message(long fd, uint64_t address, unsigned flags, bool writi
 static long ioctl_descriptor(long fd, uint64_t request, uint64_t argument) {
     open_file_t* file = fd_get(fd);
     if (!file) return -EBADF;
+    if (file->file.kind == FILE_BROWSER_FB) {
+        if (request == 0x524201) {
+            uint32_t geometry[4];
+            if (!display_get_framebuffer_size(&geometry[0], &geometry[1])) return -ENODEV;
+            geometry[2] = geometry[0] * 4;
+            geometry[3] = 1;
+            return user_copy(geometry, argument, sizeof(geometry), true) ? 0 : -EFAULT;
+        }
+        if (request == 0x524202) { display_present(); return 0; }
+        return -ENOTTY;
+    }
     if (request == 0x541b) {
-        int32_t available = file->file.kind == FILE_SOCKET ? linux_x11_available() : 0;
+        int32_t available = 0;
+        if (file->file.kind == FILE_SOCKET)
+            available = file->domain == 2 ? net_available(file->network_handle) : (long)linux_x11_available();
+        if (available < 0) return available;
         if (file->file.kind == FILE_REG) available = file->file.size - file->offset;
         return user_copy(&available, argument, sizeof(available), true) ? 0 : -EFAULT;
     }
@@ -1042,8 +1387,9 @@ static long duplicate_fd(long source, long destination, bool exact, unsigned fla
     file->references++;
     return destination;
 }
-static long get_time(uint64_t output, bool timeval) {
-    uint64_t ticks = timer_get_ticks();
+static long get_time(uint64_t output, bool timeval, bool realtime) {
+    if (realtime && !wall_clock_valid) return -EIO;
+    uint64_t ticks = realtime ? realtime_ticks() : timer_get_ticks();
     linux_time_t time = {(int64_t)(ticks / 100), (int64_t)((ticks % 100) * (timeval ? 10000 : 10000000))};
     return user_copy(&time, output, sizeof(time), true) ? 0 : -EFAULT;
 }
@@ -1144,6 +1490,13 @@ static long syscall_dispatch(uint64_t number, uint64_t a, uint64_t b, uint64_t c
     }
     case 16: return ioctl_descriptor(a, b, c);
     case 17: return read_descriptor(a, b, c, true, d);
+    case 18: {
+        open_file_t* file = fd_get(a);
+        if (!file) return -EBADF;
+        if (!(file->flags & 3)) return -EBADF;
+        if (file->file.kind == FILE_BROWSER_FB) return framebuffer_write(file, b, c, d, true);
+        return file->file.kind == FILE_REG ? -EROFS : -ESPIPE;
+    }
     case 19: return vector_io(a, b, c, false);
     case 20: return vector_io(a, b, c, true);
     case 21: case 269: {
@@ -1177,12 +1530,15 @@ static long syscall_dispatch(uint64_t number, uint64_t a, uint64_t b, uint64_t c
     case 33: return duplicate_fd(a, b, true, 0);
     case 35: case 230: {
         linux_time_t time;
+        if (number == 230 && ((b & ~1ULL) ||
+            (a != 0 && a != 1 && a != 7))) return -EINVAL;
         uint64_t pointer = number == 35 ? a : c;
         if (!user_copy(&time, pointer, sizeof(time), false)) return -EFAULT;
         if (time.sec < 0 || time.nsec < 0 || time.nsec >= 1000000000) return -EINVAL;
         uint64_t ticks = time.sec * 100 + (time.nsec + 9999999) / 10000000;
         if (number == 230 && (b & 1)) {
-            uint64_t now = timer_get_ticks();
+            if (a == 0 && !wall_clock_valid) return -EIO;
+            uint64_t now = a == 0 ? realtime_ticks() : timer_get_ticks();
             ticks = ticks > now ? ticks - now : 0;
         }
         if (ticks) task_sleep_ticks(ticks);
@@ -1190,16 +1546,47 @@ static long syscall_dispatch(uint64_t number, uint64_t a, uint64_t b, uint64_t c
     }
     case 39: case 186: return session_pid;
     case 41: {
-        if (a != 1) return -EAFNOSUPPORT;
-        if ((b & 15) != 1 || c != 0) return -EOPNOTSUPP;
+        if (a != 1 && a != 2) return -EAFNOSUPPORT;
+        unsigned type = b & 15;
+        if ((b & ~(0x80000ULL | 0x800ULL | 15)) ||
+            (type != 1 && (a != 2 || type != 2))) return -EOPNOTSUPP;
+        if (a == 1 && c) return -EOPNOTSUPP;
+        int network = -1;
+        if (a == 2) {
+            network = net_socket(type, c);
+            if (network < 0) return network;
+        }
         guest_file_t file; zero(&file, sizeof(file));
         file.kind = FILE_SOCKET; file.mode = 0140777;
-        return fd_allocate(&file, 2 | ((b & 0x800) ? 04000 : 0) | ((b & 0x80000) ? 02000000 : 0), 0);
+        long fd = fd_allocate(&file, 2 | ((b & 0x800) ? 04000 : 0) |
+            ((b & 0x80000) ? 02000000 : 0), 0);
+        if (fd < 0) { if (network >= 0) net_close(network); return fd; }
+        open_file_t* opened = fd_get(fd);
+        opened->domain = a;
+        opened->socket_type = type;
+        opened->network_handle = network;
+        return fd;
     }
     case 42: {
         open_file_t* file = fd_get(a);
         if (!file) return -EBADF;
         if (file->file.kind != FILE_SOCKET) return -ENOTSOCK;
+        if (file->domain == 2) {
+            linux_inet_address_t peer;
+            long result = socket_address_in(b, c, &peer);
+            if (result < 0) return result;
+            result = net_connect(file->network_handle, peer.address, peer.port);
+            if (result == -115 && !(file->flags & 04000)) {
+                while (!(net_events(file->network_handle) & (4 | 8 | 16))) {
+                    net_poll();
+                    task_sleep_ticks(1);
+                }
+                int error = net_error(file->network_handle);
+                result = error ? -error : 0;
+            }
+            if (!result) file->connected = true;
+            return result;
+        }
         if (c < 3 || c > 110) return -EINVAL;
         unsigned char address[110];
         if (!user_copy(address, b, c, false)) return -EFAULT;
@@ -1208,52 +1595,62 @@ static long syscall_dispatch(uint64_t number, uint64_t a, uint64_t b, uint64_t c
         if (!result) file->connected = true;
         return result;
     }
-    case 44:
-        if (e || f) return -EOPNOTSUPP;
-        return write_descriptor(a, b, c);
-    case 45: {
-        if (e || f || (d & ~0x40ULL)) return -EOPNOTSUPP;
-        open_file_t* file = fd_get(a); if (!file) return -EBADF;
-        unsigned flags = file->flags;
-        if (d & 0x40) file->flags |= 04000;
-        long result = read_descriptor(a, b, c, false, 0);
-        file->flags = flags;
-        return result;
-    }
+    case 44: return socket_transfer(a, b, c, d, true, e, f);
+    case 45: return socket_transfer(a, b, c, d, false, e, f);
     case 46: return socket_message(a, b, c, true);
     case 47: return socket_message(a, b, c, false);
     case 48: {
         open_file_t* file = fd_get(a); if (!file) return -EBADF;
         if (file->file.kind != FILE_SOCKET) return -ENOTSOCK;
         if (b > 2) return -EINVAL;
+        if (file->domain == 2) return net_shutdown(file->network_handle, b);
         file->connected = false; linux_x11_reset(); return 0;
     }
     case 51: case 52: {
         open_file_t* file = fd_get(a); if (!file) return -EBADF;
         if (file->file.kind != FILE_SOCKET) return -ENOTSOCK;
+        if (file->domain == 2) {
+            linux_inet_address_t name;
+            zero(&name, sizeof(name));
+            name.family = 2;
+            int result = number == 51 ?
+                net_sockname(file->network_handle, &name.address, &name.port) :
+                net_peername(file->network_handle, &name.address, &name.port);
+            if (result < 0) return result;
+            return socket_address_out(b, c, &name, sizeof(name));
+        }
         if (number == 52 && !file->connected) return -ENOTCONN;
-        uint32_t length;
-        if (!user_copy(&length, c, 4, false)) return -EFAULT;
-        unsigned char name[2] = {1, 0};
-        uint32_t used = length > 2 ? 2 : length;
-        if (!user_copy(name, b, used, true)) return -EFAULT;
-        length = 2;
-        return user_copy(&length, c, 4, true) ? 0 : -EFAULT;
+        uint16_t family = 1;
+        return socket_address_out(b, c, &family, sizeof(family));
     }
-    case 54: return -ENOPROTOOPT;
+    case 54: {
+        open_file_t* file = fd_get(a); if (!file) return -EBADF;
+        if (file->file.kind != FILE_SOCKET) return -ENOTSOCK;
+        if (file->domain != 2) return -ENOPROTOOPT;
+        unsigned char value[64];
+        if (e > sizeof(value)) return -EINVAL;
+        if (!user_copy(value, d, e, false)) return -EFAULT;
+        return net_setsockopt(file->network_handle, b, c, value, e);
+    }
     case 55: {
         open_file_t* file = fd_get(a); if (!file) return -EBADF;
         if (file->file.kind != FILE_SOCKET) return -ENOTSOCK;
-        if (b != 1) return -ENOPROTOOPT;
-        int32_t value;
-        if (c == 4) value = 0;
-        else if (c == 3) value = 1;
-        else return -ENOPROTOOPT;
-        uint32_t length;
-        if (!user_copy(&length, e, 4, false) || length < 4) return -EFAULT;
-        if (!user_copy(&value, d, 4, true)) return -EFAULT;
-        length = 4;
-        return user_copy(&length, e, 4, true) ? 0 : -EFAULT;
+        uint32_t capacity;
+        if (!user_copy(&capacity, e, 4, false) || !user_valid(e, 4, true)) return -EFAULT;
+        unsigned char value[64];
+        unsigned length = capacity < sizeof(value) ? capacity : sizeof(value);
+        if (!user_valid(d, length, true)) return -EFAULT;
+        if (file->domain == 2) {
+            int result = net_getsockopt(file->network_handle, b, c, value, &length);
+            if (result < 0) return result;
+        } else {
+            if (b != 1 || (c != 4 && c != 3)) return -ENOPROTOOPT;
+            int32_t option = c == 3 ? 1 : 0;
+            if (length > 4) length = 4;
+            copy(value, &option, length);
+        }
+        if (!user_copy(value, d, length, true) || !user_copy(&length, e, 4, true)) return -EFAULT;
+        return 0;
     }
     case 60: case 231: finish(a & 255);
     case 62: case 234: {
@@ -1302,7 +1699,7 @@ static long syscall_dispatch(uint64_t number, uint64_t a, uint64_t b, uint64_t c
     }
     case 89: return read_link(AT_FDCWD, a, b, c);
     case 96:
-        if (a && get_time(a, true) < 0) return -EFAULT;
+        if (a) { long result = get_time(a, true, true); if (result < 0) return result; }
         if (b) { int32_t timezone[2] = {0, 0}; if (!user_copy(timezone, b, sizeof(timezone), true)) return -EFAULT; }
         return 0;
     case 97: case 302: {
@@ -1333,7 +1730,8 @@ static long syscall_dispatch(uint64_t number, uint64_t a, uint64_t b, uint64_t c
         }
         return -EINVAL;
     case 201: {
-        int64_t seconds = timer_get_ticks() / 100;
+        if (!wall_clock_valid) return -EIO;
+        int64_t seconds = realtime_ticks() / 100;
         if (a && !user_copy(&seconds, a, 8, true)) return -EFAULT;
         return seconds;
     }
@@ -1370,7 +1768,7 @@ static long syscall_dispatch(uint64_t number, uint64_t a, uint64_t b, uint64_t c
     case 218: clear_tid = a; return session_pid;
     case 228:
         if (a != 0 && a != 1 && a != 4 && a != 5 && a != 6 && a != 7) return -EINVAL;
-        return get_time(b, false);
+        return get_time(b, false, a == 0 || a == 5);
     case 229: {
         if (a > 11) return -EINVAL;
         linux_time_t resolution = {0, 10000000};

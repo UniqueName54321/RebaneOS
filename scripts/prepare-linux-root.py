@@ -3,6 +3,8 @@
 
 No host packages are installed. All downloads and generated files stay in build/.
 """
+import argparse
+import os
 import hashlib
 import io
 import json
@@ -26,6 +28,10 @@ def download(url, name):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--browser-root", type=Path)
+    parser.add_argument("--output", type=Path, default=REPO / "build" / "linux-root.tar")
+    args = parser.parse_args()
     BUILD.mkdir(parents=True, exist_ok=True)
     packages = {}
     providers = {}
@@ -88,7 +94,47 @@ def main():
     manifest.append({"package": "busybox", "version": "1.35.0", "url": BUSYBOX,
                      "license": "GPL-2.0-only",
                      "sha256": hashlib.sha256(data).hexdigest()})
-    output = REPO / "build" / "linux-root.tar"
+    if args.browser_root:
+        payload = args.browser_root
+        if not payload.is_absolute():
+            payload = REPO / payload
+        if not (payload / "usr/bin/netsurf").is_file():
+            raise FileNotFoundError(f"Missing built browser: {payload / 'usr/bin/netsurf'}")
+        for path in sorted(payload.rglob("*")):
+            name = path.relative_to(payload).as_posix()
+            member = tarfile.TarInfo(name)
+            if path.is_symlink():
+                member.type = tarfile.SYMTYPE
+                member.linkname = os.readlink(path)
+                member.mode = 0o777
+                data = None
+            elif path.is_file():
+                data = path.read_bytes()
+                member.mode = path.stat().st_mode & 0o777
+                member.size = len(data)
+            else:
+                continue
+            files[name] = (member, data)
+        for name, data in {
+            "etc/resolv.conf": b"nameserver 10.0.2.3\n",
+            "etc/hosts": b"127.0.0.1 localhost\n",
+            "etc/nsswitch.conf": b"hosts: files dns\n",
+        }.items():
+            member = tarfile.TarInfo(name)
+            member.mode = 0o644
+            member.size = len(data)
+            files[name] = (member, data)
+    # Preserve directory semantics for resource discovery and libc stat/open.
+    for name in list(files):
+        for parent in PurePosixPath(name).parents:
+            directory = str(parent)
+            if directory == "." or directory in files:
+                continue
+            member = tarfile.TarInfo(directory)
+            member.type = tarfile.DIRTYPE
+            member.mode = 0o755
+            files[directory] = (member, None)
+    output = args.output if args.output.is_absolute() else REPO / args.output
     with tarfile.open(output, "w", format=tarfile.USTAR_FORMAT) as archive:
         for name, (member, data) in sorted(files.items()):
             archive.addfile(member, io.BytesIO(data) if data is not None else None)

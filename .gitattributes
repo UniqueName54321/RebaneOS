@@ -1,0 +1,5 @@
+# Windows checkouts must keep WSL scripts executable without CRLF shebangs.
+*.sh text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+Makefile text eol=lf

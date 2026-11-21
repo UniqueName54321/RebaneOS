@@ -10,6 +10,9 @@ bool linux_compat_launch(const char* path, const char* arguments);
 void linux_compat_task(void);
 bool linux_compat_active(void);
 bool linux_compat_current(void);
+/* Full-screen graphical browser owns display and input until its guest exits. */
+bool linux_browser_launch(const char* url);
+bool linux_browser_active(void);
 void linux_compat_fault(uint64_t vector, uint64_t error, uint64_t rip,
     uint64_t address) __attribute__((noreturn));
 

@@ -29,6 +29,9 @@ void display_init(void);
 bool display_init_framebuffer(uintptr_t boot_info_address);
 const char* display_framebuffer_status(void);
 bool display_get_framebuffer_size(uint32_t* width, uint32_t* height);
+/* Copy an aligned span from an XRGB8888 software framebuffer. */
+bool display_write_xrgb(uint64_t byte_offset, const uint32_t* pixels,
+    uint32_t pixel_count);
 void display_present(void);
 uint64_t display_get_last_present_ticks(void);
 uint64_t display_get_last_present_cycles(void);

@@ -18,4 +18,4 @@ exec make -o src/drivers/ui_assets.h \
     UI_ASSETS=build/ui_assets.h UI_ASSET_INCLUDE=build \
     CC64="$CC" ASM64="$CC" LD64="$LD" \
     CC32="$CC -m32" ASM32="$CC -m32" LD32="$LD" \
-    PYTHON=python3 "$@" all
+    PYTHON=python3 "$@" "${REBANE_BUILD_TARGET:-all}"

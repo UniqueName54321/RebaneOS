@@ -18,20 +18,70 @@ Eventually, the incorrect name became sufficiently irritating that the author de
 
 RebaneOS is not affiliated with or endorsed by Lyra Rebane.
 
-## Building on Linux and macOS
+## Unified build and VM test launcher
 
-Run `./build-linux.sh` on Linux or `./build-macos.sh` on macOS. **The macOS
-script has not been tested.** Both build `rockosdualbootv.1.iso`, containing
-the 64-bit and 32-bit kernels and installer image; they do not launch QEMU.
-Run them from any directory. Arguments are passed to GNU Make, for example:
+Use **`rebane.sh` on Linux** or **`rebane.ps1` on Windows**. With no arguments
+the launcher selects an ISO variant, builds it, and opens a fresh isolated
+VirtualBox test VM. Interactive terminals get a variant menu; unattended runs
+default to `standard`, or can select a variant explicitly.
+
+| Variant | ISO | VM test |
+| --- | --- | --- |
+| `standard` | `rockosdualbootv.1.iso` | Graphical installation, disk verification, then installed-disk boot |
+| `linux` | `build/rebane-linux.iso` | Live ISO boot with Linux apps |
+| `browser` | `build/rebane-browser.iso` | Live ISO boot with the built-in browser |
+
+The Linux/browser images are live images, not installers. Their VM tests do
+not claim an installed-disk check. Installation and application interaction
+remain manual; launching a VM alone does not mean the guest passed.
+
+Linux:
 
 ```sh
-./build-linux.sh -j4 AUDIO_BOOT_TEST_TONE=0
+./rebane.sh                         # Select, build, and test
+./rebane.sh test --variant browser --jobs 4
+./rebane.sh build --variant linux   # Build only
+./rebane.sh run --variant browser   # Test the existing ISO without rebuilding
+./rebane.sh resume /path/to/run     # Continue a recorded test
+./rebane.sh boot /path/to/run       # Boot a recorded test again
+./rebane.sh build --variant standard -- AUDIO_BOOT_TEST_TONE=0
 ```
+
+Windows PowerShell:
+
+```powershell
+.\rebane.ps1
+.\rebane.ps1 -Action Test -Variant Browser -Jobs 4
+.\rebane.ps1 -Action Build -Variant Linux
+.\rebane.ps1 -Action Run -Variant Browser
+.\rebane.ps1 -Action Resume -RunDir 'C:\path to\run'
+.\rebane.ps1 -Action Boot -RunDir 'C:\path to\run'
+.\rebane.ps1 -Action Build -Variant Standard -MakeArgs 'AUDIO_BOOT_TEST_TONE=0'
+```
+
+Windows builds use an **already configured WSL distribution** and the same
+Linux toolchain/dependencies below. This is necessary for the browser's Linux
+ELF libraries; a native Windows compiler cannot replace them. Select a distro
+with `-Distribution Ubuntu` if needed. Tests use native Windows Python 3 and
+VirtualBox, not VirtualBox inside WSL. The launcher never installs WSL,
+packages, or changes execution policy.
+
+Testing requires Python 3 and VirtualBox on the launcher host. New VM files,
+disks, and serial logs default to `build/vm-tests/`; set `REBANE_TEST_ROOT`,
+`--test-root DIR` (Linux), or `-TestRoot DIR` (PowerShell) to choose another
+location. Each run records its variant and ISO for resume/boot. Existing VMs
+and disks are never deleted or force-powered-off.
+
+Use `./rebane.sh --help`, `.\rebane.ps1 -Help`, or `Get-Help .\rebane.ps1 -Full`
+for the interface. The old `build-linux.sh` and `test-installed.sh` entry
+points have been replaced by these launchers. The lower-level macOS build
+helper remains `./build-macos.sh` (untested on macOS).
+
+### Build prerequisites
 
 Install GNU Make, Python 3, xorriso, and the Limine host tool and boot files.
 Linux also needs GCC and GNU binutils capable of building both x86-64 and
-i386 ELF code. The Linux script prefers `x86_64-elf-gcc` and `x86_64-elf-ld`
+i386 ELF code. The Linux launcher prefers `x86_64-elf-gcc` and `x86_64-elf-ld`
 when both are available, otherwise it uses native `gcc` and `ld`. On macOS,
 install an `x86_64-elf` GCC/binutils cross-toolchain; Apple's compiler and
 linker do not produce the required ELF kernels. Set `CC` and `LD` to override
@@ -44,8 +94,8 @@ or `python3-pil` on Debian/Ubuntu). It regenerates the logo from
 checked-in font atlas in `src/drivers/ui_assets.h`. Font changes still require
 regenerating the atlas on Windows.
 
-The `make run` instructions below use Windows-specific QEMU audio settings;
-the Unix scripts only build the ISO.
+The legacy `make run` target below uses Windows-specific QEMU audio settings.
+The unified launchers use the shared VirtualBox test workflow instead.
 
 ## Linux binary compatibility (64-bit)
 
@@ -57,7 +107,7 @@ need to be rebuilt for RebaneOS.
 Build a separate application ISO:
 
 ```sh
-./build-linux.sh -j4 AUDIO_BOOT_TEST_TONE=0 linux-iso
+./rebane.sh build --variant linux --jobs 4 -- AUDIO_BOOT_TEST_TONE=0
 qemu-system-x86_64 -machine pc -m 512M -boot d \
     -cdrom build/rebane-linux.iso -serial stdio
 ```
@@ -80,10 +130,10 @@ runlinux /usr/bin/xeyes
 Only one Linux process can run at a time. The initial implementation targets
 x86-64 terminal applications and X11 core clients, not arbitrary Linux software:
 there is no Wayland, fork/exec process tree, writable Linux root filesystem,
-network socket stack, or X11 extension support. Unsupported kernel operations
-return Linux error codes. Linux compatibility is not available in the 32-bit
-kernel. Linux user mappings cannot overlap the kernel, which is linked at
-16 MiB in the 64-bit build.
+or X11 extension support. IPv4 TCP/UDP sockets use the e1000 transport below.
+Unsupported kernel operations return Linux error codes. Linux compatibility is
+not available in the 32-bit kernel. Linux user mappings cannot overlap the kernel,
+which is linked at 16 MiB in the 64-bit build.
 
 For boot-driven acceptance checks, build with
 `LINUX_CMDLINE=linux_test=busybox` or `LINUX_CMDLINE=linux_test=xeyes` in the
@@ -101,6 +151,89 @@ Verified in QEMU: upstream BusyBox 1.35.0 prints `linux-ok` and exits 0;
 Alpine xeyes 1.3.0 displays its eyes using the guest X11 server. Xlib may
 print a nonfatal missing `XInputExtension` warning because extensions are
 not advertised.
+
+## Networking and built-in browser (64-bit)
+
+The browser image bundles NetSurf 3.11 with libcss, libdom, Duktape JavaScript,
+PNG/JPEG/SVG decoding, FreeType fonts, and OpenSSL-validated HTTPS. Rendering
+and JavaScript execution happen inside RebaneOS. The native e1000 driver and
+lwIP 2.2.1 carry real Ethernet/ARP/IPv4/TCP/UDP traffic; curl uses c-ares for
+non-threaded DNS. No host browser, web proxy, or remote rendering is used.
+
+The source build needs GCC/binutils, Make, pkg-config, curl, tar, flex, bison,
+Perl, and development libraries for FreeType, PNG, JPEG, OpenSSL, Expat,
+c-ares, and their dependencies. NetSurf, curl, and gperf sources are fetched
+and SHA-256 checked under `build/browser/`; no host packages are installed.
+Existing host ABI libraries, fonts, and the CA bundle are copied into the
+guest payload. Sources/licenses are listed in `tools/browser/SOURCES`.
+
+```sh
+JOBS=4 ./rebane.sh build --variant browser --jobs 4 -- AUDIO_BOOT_TEST_TONE=0
+qemu-system-x86_64 -machine pc -cpu max -m 768M -boot d \
+    -cdrom build/rebane-browser.iso -serial stdio \
+    -netdev user,id=net0 -device e1000,netdev=net0
+```
+
+Use `-cpu max` (or a CPU exposing RDRAND) for cryptographic entropy.
+The supported network configuration is QEMU user networking:
+guest `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`.
+Other NICs, IPv6, DHCP, and Linux ICMP error queues are not implemented.
+The browser uses real RTC wall time and the bundled CA store for certificate
+expiry, hostname, and trust checks; verification is not disabled.
+
+The image starts the browser by default. To start at the normal shell, build
+with `BROWSER_CMDLINE=`. Launch with `browser [url]`, or select **Web Browser**
+under the desktop's **Start > Programs** menu. The browser owns the full
+screen until closed; one Linux application can run at a time. Click the URL
+field, press **Ctrl+U**, type an HTTP or HTTPS URL, then press **Enter**.
+
+For deterministic CSS/image/JavaScript verification:
+
+```sh
+python3 scripts/serve-browser-fixture.py --port 8000
+```
+
+In the guest, open `http://10.0.2.2:8000/`. Check the blue-bordered styled
+panel and the red/green/blue PNG stripes; click **Run JavaScript** and check
+that the input changes to `JavaScript ran`. Also open `http://example.com`
+and `https://example.com`. A boot URL can be selected with, for example,
+`BROWSER_CMDLINE='linux_test=browser browser_url=http://10.0.2.2:8000/'`.
+
+For a certificate-rejection check, create an untrusted local certificate and
+run a second fixture server:
+
+```sh
+mkdir -p build/browser-test
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 2 \
+    -subj /CN=10.0.2.2 -addext subjectAltName=IP:10.0.2.2 \
+    -keyout build/browser-test/untrusted.key \
+    -out build/browser-test/untrusted.crt
+python3 scripts/serve-browser-fixture.py --port 8443 \
+    --cert build/browser-test/untrusted.crt --key build/browser-test/untrusted.key
+```
+
+Open `https://10.0.2.2:8443/` in the guest. It must not silently display the
+page as trusted. Do not bypass a certificate warning during acceptance.
+
+This is an experimental lightweight browser, not Chromium/Firefox parity.
+NetSurf's JavaScript DOM coverage is limited: form-value updates work, while
+arbitrary `textContent` mutations do not trigger a complete layout rebuild.
+Some modern JavaScript syntax is unsupported; example.com's optional script
+logs a parse error even though its page content renders.
+The framebuffer RGB decoder has a standalone regression check:
+
+```sh
+gcc -std=c11 -Wall -Wextra tests/framebuffer_layout_host_test.c \
+    -o build/framebuffer_layout_host_test
+build/framebuffer_layout_host_test
+```
+
+Acceptance verified in QEMU: HTTP and certificate-validated HTTPS example.com;
+the fixture's exact CSS/PNG colors and JavaScript button update; rejection of
+the self-signed HTTPS fixture without an override; browser close and relaunch
+through the built-in shell and desktop menu. Guest framebuffer captures and
+serial/network traces are retained under `build/browser-test/`.
+
 
 Original RockOS readme below:
 

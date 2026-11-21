@@ -5,6 +5,9 @@
 #include "network.h"
 
 #include "filesystem.h"
+#ifdef ROCKOS_ARCH_64
+#include "net_socket.h"
+#endif
 
 #include <stddef.h>
 
@@ -14,9 +17,7 @@ typedef struct {
     const char* name;
 } network_nic_table_entry_t;
 
-/* PCI IDs of NICs the setup recognizes (stage 1 of the network plan).
- * Extend the table (and name) when drivers land; unknown adapters still
- * count as NO_ADAPTER until their driver can bind them. */
+/* Discovery recognizes these devices; only an attached driver can report ready. */
 static const network_nic_table_entry_t network_nic_table[] = {
     {0x10EC, 0x8139, "Realtek RTL8139"},
     {0x10EC, 0x8136, "Realtek RTL8101E"},
@@ -35,23 +36,12 @@ static uint16_t network_device_id;
 static uint8_t network_bus;
 static uint8_t network_slot;
 static uint8_t network_function;
-static bool network_transport_attached;
-
-void network_transport_attach(void) {
-    network_transport_attached = true;
-    /* Refresh the status right away so a runtime-attached transport is
-     * visible on the next probe without shell involvement. */
-    (void)network_probe();
-}
 
 network_status_t network_probe(void) {
-    if (filesystem_is_mounted() != 1) {
-        /* A mounted RockFS disk is mandatory: the setup stages its
-         * downloads and the offline rollback mirror there. */
-        network_current_status = NETWORK_STATUS_NO_MOUNT;
-        network_adapter_name = 0;
-        return network_current_status;
-    }
+    bool transport_ready = false;
+#ifdef ROCKOS_ARCH_64
+    transport_ready = net_is_ready();
+#endif
     if (!pci_was_scanned()) {
         pci_init();
         pci_scan();
@@ -71,7 +61,8 @@ network_status_t network_probe(void) {
         network_bus = found->bus;
         network_slot = found->device;
         network_function = found->function;
-        if (network_transport_attached) {
+        if (entry->vendor_id == 0x8086 && entry->device_id == 0x100e &&
+                transport_ready) {
             network_current_status = NETWORK_STATUS_READY;
         } else {
             network_current_status = NETWORK_STATUS_ADAPTER_FOUND;
@@ -98,7 +89,7 @@ network_status_t network_describe(network_info_t* info) {
 }
 
 bool network_is_online(void) {
-    return network_current_status == NETWORK_STATUS_READY;
+    return network_probe() == NETWORK_STATUS_READY;
 }
 
 bool network_has_mount(void) {

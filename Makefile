@@ -77,8 +77,13 @@ ASM32_SOURCES = src/arch/i386/boot32.S \
 			  src/drivers/error_sound.S
 
 LINUX_SOURCES = src/kernel/linux_compat.c src/kernel/linux_x11.c
+NET_SOURCES = src/kernel/net_socket.c src/drivers/e1000.c \
+              $(wildcard third_party/lwip/src/core/*.c) \
+              $(wildcard third_party/lwip/src/core/ipv4/*.c) \
+              third_party/lwip/src/netif/ethernet.c
+CFLAGS64 += -Ithird_party/lwip/src/include -Iinclude/lwip-port
 
-OBJS64 = $(ASM64_SOURCES:.S=.o) $(C_SOURCES:.c=.o) $(LINUX_SOURCES:.c=.o) src/arch/x86_64/linux_entry.o
+OBJS64 = $(ASM64_SOURCES:.S=.o) $(C_SOURCES:.c=.o) $(LINUX_SOURCES:.c=.o) $(NET_SOURCES:.c=.o) src/arch/x86_64/linux_entry.o
 # NOTE: error_sound.S is shared; 32-bit uses error_sound.32.o to avoid
 # clobbering the 64-bit error_sound.o. i386 arch objects live in their
 # own directory so plain .o is safe there.
@@ -146,6 +151,8 @@ build/ui_assets.h: src/drivers/ui_assets.h assets/rockos-logo-outlined.png scrip
 
 src/drivers/display.o: $(UI_ASSETS)
 src/drivers/display.32.o: $(UI_ASSETS)
+src/drivers/display.o src/drivers/display.32.o: include/framebuffer_layout.h
+$(NET_SOURCES:.c=.o): include/lwip-port/lwipopts.h include/lwip-port/arch/cc.h $(wildcard include/lwip-port/*.h)
 
 $(ISO_BOOT_DIR)/selawik-OFL.txt: $(UI_FONT_LICENSE)
 	mkdir -p $(ISO_BOOT_DIR)
@@ -235,24 +242,43 @@ clean:
 linux-root:
 	$(PYTHON) scripts/prepare-linux-root.py
 
-linux-iso: $(ISO_IMAGE) build/linux-root.tar
-	mkdir -p build/linux-iso/boot
-	cp -R $(ISO_DIR)/. build/linux-iso/
-	cp build/linux-root.tar build/linux-iso/boot/linux-root.tar
-	printf '%s\n' 'timeout: 0' '/RebaneOS Linux compatibility (64-bit)' \
+linux-iso: APP_ROOT = build/linux-root.tar
+linux-iso: APP_STAGE = build/linux-iso
+linux-iso: APP_IMAGE = build/rebane-linux.iso
+linux-iso: APP_CMDLINE = $(LINUX_CMDLINE)
+linux-iso: build/linux-root.tar
+
+browser-iso: APP_ROOT = build/browser-root.tar
+browser-iso: APP_STAGE = build/browser-iso
+browser-iso: APP_IMAGE = build/rebane-browser.iso
+browser-iso: APP_CMDLINE = $(BROWSER_CMDLINE)
+browser-iso: build/browser-root.tar
+BROWSER_CMDLINE ?= linux_test=browser
+
+linux-iso browser-iso: $(ISO_IMAGE)
+	mkdir -p $(APP_STAGE)/boot
+	cp -R $(ISO_DIR)/. $(APP_STAGE)/
+	cp $(APP_ROOT) $(APP_STAGE)/boot/linux-root.tar
+	printf '%s\n' 'timeout: 0' '/RebaneOS applications (64-bit)' \
 		'    protocol: multiboot1' '    kernel_path: boot():/boot/rockos.bin' \
 		'    resolution: 1024x768x32' '    textmode: no' \
 		'    module_path: boot():/boot/linux-root.tar' \
 		'    module_string: REBANE_LINUX_ROOT' \
-		'    cmdline: $(LINUX_CMDLINE)' > build/linux-iso/boot/limine.conf
+		'    cmdline: $(APP_CMDLINE)' > $(APP_STAGE)/boot/limine.conf
 	xorriso -as mkisofs -R -r -J -b boot/limine-bios-cd.bin \
 		-no-emul-boot -boot-load-size 4 -boot-info-table \
 		--efi-boot boot/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
-		-o build/rebane-linux.iso build/linux-iso
+		-o $(APP_IMAGE) $(APP_STAGE)
 
 build/linux-root.tar: scripts/prepare-linux-root.py
 	$(PYTHON) $<
 
-.PHONY: linux-root linux-iso
+build/browser/payload.stamp: scripts/build-browser.sh $(wildcard tools/browser/*)
+	bash scripts/build-browser.sh
+
+build/browser-root.tar: build/browser/payload.stamp scripts/prepare-linux-root.py
+	$(PYTHON) scripts/prepare-linux-root.py --browser-root build/browser/payload --output $@
+
+.PHONY: linux-root linux-iso browser-iso
 
 .PHONY: all run run-installed clean kernel32

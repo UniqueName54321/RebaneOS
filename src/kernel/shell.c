@@ -2598,6 +2598,7 @@ static void shell_print_help(void) {
     shell_write("runexe path  Launch a PE32 .exe image (or `runexe builtin` for the demo); no imports yet\n");
 #ifndef ROCKOS_ARCH_32
     shell_write("runlinux path [args]  Run an unmodified x86-64 Linux ELF binary\n");
+    shell_write("browser [url]  Open the built-in graphical web browser\n");
 #endif
     shell_write("installer Check for a safe dedicated install disk\n");
     shell_write("version   Show RockOS version and kernel identity\n");
@@ -2768,6 +2769,16 @@ static void shell_execute(void) {
         shell_draw_screen();
         return;
 #ifndef ROCKOS_ARCH_32
+    } else if (command_is(command_buffer, "browser") ||
+        shell_get_argument(command_buffer, "browser", argument, sizeof(argument))) {
+        const char* url = command_is(command_buffer, "browser")
+            ? "https://example.com" : argument;
+        if (!linux_browser_launch(url)) {
+            shell_write("browser: unavailable or another Linux application is running\n");
+        } else {
+            task_yield();
+        }
+        return;
     } else if (shell_get_path_and_text(command_buffer, "runlinux", argument,
         sizeof(argument), &text)) {
         if (!linux_compat_launch(argument, text)) {
@@ -2912,6 +2923,9 @@ void shell_handle_key_event(const input_key_event_t* event) {
         }
         if (shell_editor_active) return;
         if (shell_installer_active) return;
+#ifndef ROCKOS_ARCH_32
+        if (linux_browser_active()) return;
+#endif
         shell_draw_prompt();
         return;
     }

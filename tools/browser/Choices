@@ -1,0 +1,9 @@
+enable_javascript:1
+ca_bundle:/etc/ssl/certs/ca-certificates.crt
+homepage_url:http://example.com/
+use_disk_cache:0
+fetch_timeout:30
+max_fetchers:4
+max_fetchers_per_host:2
+window_width:1024
+window_height:768

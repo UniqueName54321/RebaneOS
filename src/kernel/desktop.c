@@ -35,6 +35,10 @@
 #include "pmm.h"
 #include "shell.h"
 #include "timer.h"
+#ifndef ROCKOS_ARCH_32
+#include "linux_compat.h"
+#include "task.h"
+#endif
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -127,7 +131,7 @@ enum {
 
 enum {
     A_NONE = 0, A_COMPUTER, A_DOCS, A_TERM, A_SYSINFO, A_DISPLAY, A_ABOUT,
-    A_NETWORK, A_RECYCLE, A_LOGOFF, A_SHUTDOWN
+    A_NETWORK, A_RECYCLE, A_LOGOFF, A_SHUTDOWN, A_BROWSER
 };
 
 enum {
@@ -303,6 +307,9 @@ typedef struct {
 } menu_item_t;
 
 static const sub_item_t subs_programs[] = {
+#ifndef ROCKOS_ARCH_32
+    { "Web Browser", A_BROWSER },
+#endif
     { "My Computer", A_COMPUTER },
     { "Command Prompt", A_TERM },
     { "System Information", A_SYSINFO }
@@ -321,7 +328,8 @@ static const sub_item_t subs_search[] = {
 
 #define MENU_COUNT 9
 static const menu_item_t menu_items[MENU_COUNT] = {
-    { "Programs", IC_PROGRAMS, A_NONE, 3, subs_programs },
+    { "Programs", IC_PROGRAMS, A_NONE,
+      sizeof(subs_programs) / sizeof(subs_programs[0]), subs_programs },
     { "Documents", IC_DOCS, A_NONE, 2, subs_documents },
     { "Settings", IC_SETTINGS, A_NONE, 2, subs_settings },
     { "Search", IC_SEARCH, A_NONE, 1, subs_search },
@@ -1386,6 +1394,18 @@ static void term_exec(char* cmd)
         term_push("mem uptime ver scheme exit shell");
         term_push("write <path> <text>   read <path>   cd <path>");
         term_push("scheme <0-2>  changes the colour scheme");
+#ifndef ROCKOS_ARCH_32
+        term_push("browser [url]  opens the graphical web browser");
+#endif
+#ifndef ROCKOS_ARCH_32
+    } else if (streq(argv[0], "browser")) {
+        if (argc > 2 || !linux_browser_launch(argc == 2 ? argv[1] : "https://example.com")) {
+            term_push("browser: unavailable or another Linux app is running");
+        } else {
+            desktop_stop();
+            task_yield();
+        }
+#endif
     } else if (streq(argv[0], "cls") || streq(argv[0], "clear")) {
         term_count = 0;
     } else if (streq(argv[0], "pwd")) {
@@ -1621,6 +1641,14 @@ static void run_action(int a)
     case A_NETWORK: win_open(W_NETWORK); break;
     case A_RECYCLE: win_open(W_RECYCLE); break;
     case A_LOGOFF:  desktop_stop(); break;
+#ifndef ROCKOS_ARCH_32
+    case A_BROWSER:
+        if (linux_browser_launch("https://example.com")) {
+            desktop_stop();
+            task_yield();
+        }
+        break;
+#endif
     case A_SHUTDOWN:
         desktop_stop();
         acpi_poweroff();

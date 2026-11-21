@@ -23,6 +23,7 @@
 #include "linux_compat.h"
 #include "linux_x11.h"
 #include "multiboot1.h"
+#include "net_socket.h"
 #endif
 
 #include <stddef.h>
@@ -298,6 +299,29 @@ static bool kernel_boot_option(uintptr_t boot_info_address, const char* option) 
     }
     return false;
 }
+
+static bool kernel_boot_argument(uintptr_t boot_info_address, const char* key,
+    char* output, size_t capacity) {
+    const multiboot1_info_t* info = (const void*)boot_info_address;
+    if (!(info->flags & MULTIBOOT1_INFO_CMDLINE) || !info->cmdline) return false;
+    const char* text = (const char*)(uintptr_t)info->cmdline;
+    while (*text) {
+        while (*text == ' ') text++;
+        size_t prefix = 0;
+        while (key[prefix] && text[prefix] == key[prefix]) prefix++;
+        if (!key[prefix]) {
+            text += prefix;
+            size_t length = 0;
+            while (text[length] && text[length] != ' ') length++;
+            if (!length || length >= capacity) return false;
+            for (size_t i = 0; i < length; i++) output[i] = text[i];
+            output[length] = '\0';
+            return true;
+        }
+        while (*text && *text != ' ') text++;
+    }
+    return false;
+}
 #endif
 
 
@@ -505,11 +529,19 @@ void kernel_main(uint32_t boot_magic, uintptr_t boot_info_address) {
     // 5. Enable interrupts only after complete hardware setup
     asm volatile ("sti");
 #ifndef ROCKOS_ARCH_32
+    bool browser_had_focus = false;
+    if (!net_init()) serial_write_string("[net] transport unavailable\n");
     bool linux_started = false;
     if (kernel_boot_option(boot_info_address, "linux_test=busybox")) {
         linux_started = linux_compat_launch("/bin/busybox", "echo linux-ok");
     } else if (kernel_boot_option(boot_info_address, "linux_test=xeyes")) {
         linux_started = linux_compat_launch("/usr/bin/xeyes", "");
+    } else if (kernel_boot_option(boot_info_address, "linux_test=browser")) {
+        char url[256];
+        const char* target = kernel_boot_argument(boot_info_address,
+            "browser_url=", url, sizeof(url)) ? url : "https://example.com";
+        linux_started = linux_browser_launch(target);
+        browser_had_focus = linux_started;
     }
     if (linux_started) task_yield();
 #endif
@@ -525,6 +557,19 @@ void kernel_main(uint32_t boot_magic, uintptr_t boot_info_address) {
     // 6. Main execution loop
     while (1) {
         audio_poll();
+#ifndef ROCKOS_ARCH_32
+        net_poll();
+        if (linux_browser_active()) {
+            browser_had_focus = true;
+            task_yield();
+            asm volatile ("hlt");
+            continue;
+        }
+        if (browser_had_focus) {
+            browser_had_focus = false;
+            shell_redraw();
+        }
+#endif
         uint64_t current_ticks = timer_get_ticks();
         if (desktop_is_active()) {
             input_mouse_state_t dms;

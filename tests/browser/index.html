@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>RebaneOS browser acceptance</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="action.js"></script>
+</head>
+<body>
+  <h1>Browser feature check</h1>
+  <div class="panel">
+    <h2>CSS and image rendering</h2>
+    <p>This panel has a blue border, a pale background, and padded content.</p>
+    <img src="badge.png" width="64" height="64" alt="Three-color test image">
+    <p>The image above contains red, green, and blue horizontal stripes.</p>
+    <h2>JavaScript interaction</h2>
+    <button type="button" onclick="runCheck()">Run JavaScript</button>
+    <p><input id="result" aria-label="JavaScript result" readonly value="Waiting for JavaScript"></p>
+  </div>
+  <p><a href="http://example.com">HTTP example.com</a> |
+     <a href="https://example.com">HTTPS example.com</a></p>
+</body>
+</html>

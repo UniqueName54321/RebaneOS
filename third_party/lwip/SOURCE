@@ -1,0 +1,11 @@
+Upstream: https://github.com/lwip-tcpip/lwip
+Release: STABLE-2_2_1_RELEASE (lwIP 2.2.1)
+Archive: https://codeload.github.com/lwip-tcpip/lwip/tar.gz/refs/tags/STABLE-2_2_1_RELEASE
+SHA256: ce0b7461c0ad9602c376f0bf07c5eb7253b48c7bf66f011c6bf3e2a96731c539
+License: COPYING (BSD-3-Clause); upstream sources unmodified.
+Reproduce: download archive inside the repository, extract, and rename
+lwip-STABLE-2_2_1_RELEASE to third_party/lwip. Build only src/core/*.c,
+src/core/ipv4/*.c, src/netif/ethernet.c with include/lwip-port and
+third_party/lwip/src/include on the include path. No host installation.
+RebaneOS config uses NO_SYS and static 10.0.2.15/24 via 10.0.2.2 for QEMU
+user networking. Guest libc resolves names through UDP to 10.0.2.3.
